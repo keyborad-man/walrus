@@ -82,8 +82,12 @@ function sortClientOptions(options: WorldOptionField[], isEn: boolean): WorldOpt
   })
 }
 
-function extractPresetLevelId(lua: string): string {
-  return lua.match(/^\s*id\s*=\s*["']([^"']+)["']/m)?.[1] ?? ''
+function extractPresetSettingsId(lua: string): string {
+  return (
+    lua.match(/^\s*settings_id\s*=\s*["']([^"']+)["']/m)?.[1] ??
+    lua.match(/^\s*id\s*=\s*["']([^"']+)["']/m)?.[1] ??
+    ''
+  )
 }
 
 function extractPresetOverrides(lua: string): Record<string, string> {
@@ -318,10 +322,10 @@ export function WorldVisualEditor({
   }, [draftOverrides, knownKeys])
 
   const matchedPreset = useMemo(() => {
-    const levelId = data?.parsed?.id?.trim()
-    if (!levelId) return null
-    return presets.find((p) => extractPresetLevelId(p.lua) === levelId) ?? null
-  }, [data?.parsed?.id, presets])
+    const settingsId = data?.parsed?.settings_id?.trim() || data?.parsed?.id?.trim()
+    if (!settingsId) return null
+    return presets.find((p) => extractPresetSettingsId(p.lua) === settingsId) ?? null
+  }, [data?.parsed?.settings_id, data?.parsed?.id, presets])
 
   const isCustomizedFromPreset = useMemo(() => {
     if (!matchedPreset) return false

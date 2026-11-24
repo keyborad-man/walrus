@@ -183,6 +183,7 @@ export interface SystemSettings {
   has_default_token: boolean
   steam_api_key: string
   has_steam_api_key: boolean
+  has_default_steam_api_key?: boolean
   dst_branch: string
   dst_arch: string
   auto_update_mode: string
@@ -249,6 +250,8 @@ export interface WorldOptionGroup {
 
 export interface ParsedLevelData {
   id: string
+  settings_id?: string
+  worldgen_id?: string
   name: string
   location: string
   playstyle: string

@@ -30,6 +30,7 @@ export function SettingsPage() {
   const [portEnd, setPortEnd] = useState(11060)
   const [defaultToken, setDefaultToken] = useState('')
   const [steamKey, setSteamKey] = useState('')
+  const [clearSteamKey, setClearSteamKey] = useState(false)
   const [branch, setBranch] = useState('public')
   const [arch, setArch] = useState('64')
   const [autoUpdate, setAutoUpdate] = useState('manual')
@@ -46,6 +47,7 @@ export function SettingsPage() {
     setBackupRetain(data.settings.backup_max_retain)
     setDefaultToken('')
     setSteamKey('')
+    setClearSteamKey(false)
   }
 
   useEffect(() => {
@@ -64,9 +66,10 @@ export function SettingsPage() {
       autoUpdate !== s.auto_update_mode ||
       Number(backupRetain) !== s.backup_max_retain ||
       defaultToken.trim().length > 0 ||
-      steamKey.trim().length > 0
+      steamKey.trim().length > 0 ||
+      clearSteamKey
     )
-  }, [data, portStart, portEnd, branch, arch, autoUpdate, backupRetain, defaultToken, steamKey])
+  }, [data, portStart, portEnd, branch, arch, autoUpdate, backupRetain, defaultToken, steamKey, clearSteamKey])
 
   const startNum = Number(portStart)
   const endNum = Number(portEnd)
@@ -92,13 +95,16 @@ export function SettingsPage() {
       }
       if (defaultToken.trim()) payload.default_cluster_token = defaultToken.trim()
       if (steamKey.trim()) payload.steam_api_key = steamKey.trim()
+      else if (clearSteamKey) payload.steam_api_key = ''
       return api.updateSettings(payload)
     },
     onSuccess: () => {
       toast.success(t('common.savedSuccess'))
       setDefaultToken('')
       setSteamKey('')
+      setClearSteamKey(false)
       void qc.invalidateQueries({ queryKey: ['system-settings'] })
+      void qc.invalidateQueries({ queryKey: ['workshop-search'] })
     },
     onError: (err: Error) => toast.error(err.message),
   })
@@ -254,21 +260,42 @@ export function SettingsPage() {
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <Label htmlFor="set-steamkey">{t('settings.steamApiKey')}</Label>
-              {data.settings.has_steam_api_key && (
-                <Badge variant="success" className="font-mono">
-                  {data.settings.steam_api_key}
-                </Badge>
-              )}
+              {data.settings.has_steam_api_key && !clearSteamKey ? (
+                <div className="flex items-center gap-2">
+                  <Badge variant="success" className="font-mono">
+                    {data.settings.steam_api_key}
+                  </Badge>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearSteamKey(true)
+                      setSteamKey('')
+                    }}
+                    className="text-xs font-medium text-muted-foreground hover:text-foreground underline underline-offset-4 cursor-pointer"
+                  >
+                    {data.settings.has_default_steam_api_key
+                      ? t('settings.clearSteamKeyToDefault')
+                      : t('settings.clearSteamKey')}
+                  </button>
+                </div>
+              ) : data.settings.has_default_steam_api_key ? (
+                <Badge variant="info">{t('settings.steamKeyUsingDefault')}</Badge>
+              ) : null}
             </div>
             <SecretInput
               id="set-steamkey"
               placeholder={
-                data.settings.has_steam_api_key
+                data.settings.has_steam_api_key && !clearSteamKey
                   ? t('settings.secretPlaceholder')
-                  : t('settings.steamKeyPlaceholderUnset')
+                  : data.settings.has_default_steam_api_key
+                    ? t('settings.steamKeyPlaceholderUsingDefault')
+                    : t('settings.steamKeyPlaceholderUnset')
               }
               value={steamKey}
-              onChange={(e) => setSteamKey(e.target.value)}
+              onChange={(e) => {
+                setSteamKey(e.target.value)
+                if (e.target.value.trim()) setClearSteamKey(false)
+              }}
             />
           </div>
         </CardContent>

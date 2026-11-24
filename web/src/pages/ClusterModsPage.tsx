@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -41,6 +41,12 @@ import { PageCardsSkeleton } from '@/components/ui/skeleton'
 import type { ClusterModItem, ModCache, ModConfigOption } from '@/types/api'
 
 type ModsTab = 'configured' | 'workshop' | 'local' | 'raw'
+
+function formatCompactCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}K`
+  return String(n)
+}
 
 function ModThumbnail({ src, alt }: { src?: string; alt: string }) {
   const [failed, setFailed] = useState(false)
@@ -592,8 +598,16 @@ export function ClusterModsPage() {
           </form>
 
           {searchData?.is_mock && (
-            <div className="rounded-lg border border-amber-600/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-900 dark:border-amber-500/30 dark:text-amber-300">
-              {t('mods.mockCatalogHint')}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-900 dark:border-amber-500/30 dark:text-amber-300">
+              <span>{t('mods.mockCatalogHint')}</span>
+              {isAdmin && (
+                <Link
+                  to="/settings"
+                  className="font-medium underline underline-offset-4 hover:opacity-80 shrink-0"
+                >
+                  {t('mods.configureApiKey')}
+                </Link>
+              )}
             </div>
           )}
 
@@ -603,39 +617,76 @@ export function ClusterModsPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {(searchData?.items ?? []).map((item) => {
-              const added = installedIds.has(item.mod_id)
-              return (
-                <Card key={item.workshop_id} className="flex flex-col">
-                  <CardContent className="p-4 flex-1 flex flex-col justify-between gap-3">
-                    <div className="space-y-3">
-                      <div className="flex items-start gap-3">
-                        <ModThumbnail src={item.preview_url} alt={item.title} />
-                        <div className="min-w-0">
-                          <h2 className="font-semibold text-sm line-clamp-1">{item.title}</h2>
-                          <div className="font-mono text-xs text-muted-foreground tabular-nums">ID: {item.workshop_id}</div>
+          {searching && !searchData ? (
+            <PageCardsSkeleton count={3} />
+          ) : !searchErr && searchData && searchData.items.length === 0 ? (
+            <EmptyState
+              icon={<Search className="h-5 w-5" />}
+              title={t('mods.searchEmptyTitle')}
+              description={searchData.is_mock ? t('mods.searchEmptyCuratedDesc') : t('mods.searchEmptyRemoteDesc')}
+              action={
+                submittedQuery ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      setSearchQuery('')
+                      setSubmittedQuery('')
+                    }}
+                  >
+                    {searchData.is_mock ? t('mods.showAllCurated') : t('common.clearSearch')}
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <div className="space-y-3">
+              {searchData?.is_mock && !submittedQuery && searchData.items.length > 0 && (
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">{t('mods.curatedSectionTitle')}</span>
+                  <span className="tabular-nums">{searchData.items.length}</span>
+                </div>
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {(searchData?.items ?? []).map((item) => {
+                  const added = installedIds.has(item.mod_id)
+                  return (
+                    <Card key={item.workshop_id} className="flex flex-col">
+                      <CardContent className="p-4 flex-1 flex flex-col justify-between gap-3">
+                        <div className="space-y-3">
+                          <div className="flex items-start gap-3">
+                            <ModThumbnail src={item.preview_url} alt={item.title} />
+                            <div className="min-w-0">
+                              <h2 className="font-semibold text-sm line-clamp-1">{item.title}</h2>
+                              <div className="flex items-center gap-2 font-mono text-xs text-muted-foreground tabular-nums">
+                                <span>ID: {item.workshop_id}</span>
+                                {item.subscriptions > 0 && (
+                                  <span>· {t('mods.subscriptionsCount', { value: formatCompactCount(item.subscriptions) })}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                          <p className="text-xs text-muted-foreground line-clamp-3">{item.description}</p>
+                          {item.is_client_only && <Badge variant="warning">{t('mods.clientOnlyWarn')}</Badge>}
                         </div>
-                      </div>
-                      <p className="text-xs text-muted-foreground line-clamp-3">{item.description}</p>
-                      {item.is_client_only && <Badge variant="warning">{t('mods.clientOnlyWarn')}</Badge>}
-                    </div>
-                    <div className="pt-2 border-t border-border flex justify-end">
-                      <Button
-                        size="sm"
-                        variant={added ? 'secondary' : 'default'}
-                        disabled={added || !canOperate || addWorkshopMut.isPending}
-                        onClick={() => addWorkshopMut.mutate({ input: item.workshop_id, is_collection: false })}
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        {added ? t('mods.alreadyAdded') : t('mods.addToCluster')}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              )
-            })}
-          </div>
+                        <div className="pt-2 border-t border-border flex justify-end">
+                          <Button
+                            size="sm"
+                            variant={added ? 'secondary' : 'default'}
+                            disabled={added || !canOperate || addWorkshopMut.isPending}
+                            onClick={() => addWorkshopMut.mutate({ input: item.workshop_id, is_collection: false })}
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            {added ? t('mods.alreadyAdded') : t('mods.addToCluster')}
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

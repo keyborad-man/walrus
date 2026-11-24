@@ -19,19 +19,21 @@ import (
 )
 
 type managedProc struct {
-	clusterID    string
-	shard        string
-	opts         StartOptions
-	state        ShardState
-	cmd          *exec.Cmd
-	stdin        io.WriteCloser
-	pid          int
-	startedAt    time.Time
+	clusterID     string
+	shard         string
+	opts          StartOptions
+	state         ShardState
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	pid           int
+	startedAt     time.Time
 	stopRequested bool
-	restartCount int
-	crashWindow  []time.Time
-	lastError    string
-	doneCh       chan struct{}
+	fatalError    string
+	lastLuaError  string
+	restartCount  int
+	crashWindow   []time.Time
+	lastError     string
+	doneCh        chan struct{}
 }
 
 // LinuxDriver manages real Don't Starve Together dedicated server binaries via os/exec.
@@ -271,8 +273,84 @@ func (d *LinuxDriver) streamOutput(mp *managedProc, r io.Reader, isErr bool) {
 				mp.state = StateRunning
 			}
 			d.mu.Unlock()
+		} else {
+			d.checkFatalStartupLine(mp, line)
 		}
 		d.logs.Publish(mp.clusterID, mp.shard, level, line)
+	}
+}
+
+func extractLuaErrorDetail(line string) string {
+	idx := strings.Index(line, "DoLuaFile Error:")
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimSpace(line[idx+len("DoLuaFile Error:"):])
+}
+
+func detectFatalStartupError(line string) (string, bool) {
+	switch {
+	case strings.Contains(line, "Worldgen had an error"):
+		return "world generation failed", true
+	case strings.Contains(line, "WorldSim::SimThread::Main() ERROR"):
+		return "world generation failed", true
+	case strings.Contains(line, "Error loading worldgen_main.lua"):
+		return "world generation failed", true
+	default:
+		return "", false
+	}
+}
+
+func (d *LinuxDriver) checkFatalStartupLine(mp *managedProc, line string) {
+	luaDetail := extractLuaErrorDetail(line)
+	fatalReason, isFatal := detectFatalStartupError(line)
+	if luaDetail == "" && !isFatal {
+		return
+	}
+
+	var shouldTerminate bool
+	var errMsg string
+
+	d.mu.Lock()
+	if mp.state == StateStarting && !mp.stopRequested {
+		if luaDetail != "" {
+			mp.lastLuaError = luaDetail
+		}
+		if isFatal && mp.fatalError == "" {
+			errMsg = fatalReason
+			if mp.lastLuaError != "" {
+				errMsg = fmt.Sprintf("%s: %s", fatalReason, mp.lastLuaError)
+			}
+			mp.fatalError = errMsg
+			mp.lastError = errMsg
+			shouldTerminate = true
+		}
+	}
+	d.mu.Unlock()
+
+	if shouldTerminate {
+		go d.terminateHungProc(mp, errMsg)
+	}
+}
+
+func (d *LinuxDriver) terminateHungProc(mp *managedProc, errMsg string) {
+	// Allow a brief window for DST to flush the remaining Lua stacktrace lines.
+	select {
+	case <-mp.doneCh:
+		return
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	d.logs.Publish(mp.clusterID, mp.shard, "error", fmt.Sprintf("[walrus] Fatal startup error detected (%s); terminating hung shard process.", errMsg))
+
+	if mp.cmd != nil && mp.cmd.Process != nil {
+		_ = mp.cmd.Process.Signal(os.Interrupt)
+		select {
+		case <-mp.doneCh:
+			return
+		case <-time.After(2 * time.Second):
+			_ = mp.cmd.Process.Kill()
+		}
 	}
 }
 
@@ -290,8 +368,11 @@ func (d *LinuxDriver) waitLoop(mp *managedProc) {
 		return
 	}
 
+	fatalErr := mp.fatalError
 	errMsg := "process exited unexpectedly"
-	if err != nil {
+	if fatalErr != "" {
+		errMsg = fatalErr
+	} else if err != nil {
 		errMsg = err.Error()
 	}
 	mp.state = StateCrashed
@@ -310,10 +391,16 @@ func (d *LinuxDriver) waitLoop(mp *managedProc) {
 	filtered = append(filtered, now)
 	mp.crashWindow = filtered
 
-	shouldRestart := mp.opts.AutoRestart && len(filtered) <= 3
+	shouldRestart := fatalErr == "" && mp.opts.AutoRestart && len(filtered) <= 3
 	nextRestartCount := mp.restartCount + 1
 	opts := mp.opts
 	d.mu.Unlock()
+
+	if fatalErr != "" {
+		d.logs.Publish(mp.clusterID, mp.shard, "error", fmt.Sprintf("[walrus] Shard startup aborted: %s (auto-restart skipped)", errMsg))
+		d.emitEvent("server.crash", "DST Shard Startup Failed", fmt.Sprintf("Shard %s failed to start: %s", mp.shard, errMsg), mp.clusterID)
+		return
+	}
 
 	d.logs.Publish(mp.clusterID, mp.shard, "error", fmt.Sprintf("[walrus] Shard exited unexpectedly: %s", errMsg))
 	d.emitEvent("server.crash", "DST Shard Crashed", fmt.Sprintf("Shard %s exited unexpectedly: %s", mp.shard, errMsg), mp.clusterID)

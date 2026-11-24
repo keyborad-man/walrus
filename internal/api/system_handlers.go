@@ -24,6 +24,7 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err)
 		return
 	}
+	st.HasDefaultSteamAPIKey = strings.TrimSpace(s.cfg.SteamAPIKey) != ""
 	c.JSON(http.StatusOK, gin.H{
 		"settings":     st,
 		"runtime_mode": s.driver.Mode(),
@@ -102,6 +103,9 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	s.store.AddAuditLog(u.Username, "system.settings.update", "settings", "Updated global system settings", c.ClientIP())
 
 	updated, _ := s.store.GetSystemSettings(false)
+	if updated != nil {
+		updated.HasDefaultSteamAPIKey = strings.TrimSpace(s.cfg.SteamAPIKey) != ""
+	}
 	c.JSON(http.StatusOK, gin.H{"settings": updated})
 }
 

@@ -266,11 +266,13 @@ func SerializeModOverrides(overrides map[string]ModOverride) string {
 // --- leveldataoverride.lua ---
 
 type ParsedLevelData struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	Location  string         `json:"location"`
-	Playstyle string         `json:"playstyle"`
-	Overrides map[string]any `json:"overrides"`
+	ID         string         `json:"id"`
+	SettingsID string         `json:"settings_id"`
+	WorldgenID string         `json:"worldgen_id"`
+	Name       string         `json:"name"`
+	Location   string         `json:"location"`
+	Playstyle  string         `json:"playstyle"`
+	Overrides  map[string]any `json:"overrides"`
 }
 
 func ValidateLevelLua(src string) error {
@@ -298,6 +300,12 @@ func ParseLevelData(src string) (*ParsedLevelData, error) {
 	}
 	if s, ok := root["id"].(string); ok {
 		out.ID = s
+	}
+	if s, ok := root["settings_id"].(string); ok {
+		out.SettingsID = s
+	}
+	if s, ok := root["worldgen_id"].(string); ok {
+		out.WorldgenID = s
 	}
 	if s, ok := root["name"].(string); ok {
 		out.Name = s

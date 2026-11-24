@@ -81,8 +81,9 @@ type SystemSettings struct {
 	PortPoolEnd         int    `json:"port_pool_end"`
 	DefaultClusterToken string `json:"default_cluster_token"`
 	HasDefaultToken     bool   `json:"has_default_token"`
-	SteamAPIKey         string `json:"steam_api_key"`
-	HasSteamAPIKey      bool   `json:"has_steam_api_key"`
+	SteamAPIKey           string `json:"steam_api_key"`
+	HasSteamAPIKey        bool   `json:"has_steam_api_key"`
+	HasDefaultSteamAPIKey bool   `json:"has_default_steam_api_key"`
 	DSTBranch           string `json:"dst_branch"`       // public | updatebeta
 	DSTArch             string `json:"dst_arch"`         // 64 | 32
 	AutoUpdateMode      string `json:"auto_update_mode"` // manual | when_empty | scheduled

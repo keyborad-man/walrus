@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ const (
 	DSTGameAppID   = "322330"
 	KleiBuildsURL  = "https://s3.amazonaws.com/dstbuilds/builds.json"
 )
+
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 type TaskState string
 
@@ -191,6 +194,10 @@ func (m *Manager) SteamCMDPath() string {
 	return filepath.Join(m.steamCMDDir, "steamcmd.sh")
 }
 
+func (m *Manager) steamCMDHomeDir() string {
+	return filepath.Join(m.steamCMDDir, "home")
+}
+
 func (m *Manager) Status(branch string) Status {
 	if branch == "" {
 		branch = "public"
@@ -320,9 +327,21 @@ func (m *Manager) runServerUpdate(branch string, validate bool) {
 		return
 	}
 
+	args := m.buildServerUpdateArgs(branch, validate)
+
+	m.publish(fmt.Sprintf("[walrus] Running SteamCMD update (app %s, branch=%s)...", DSTServerAppID, branch))
+	err := m.runWithMissingConfigRetry(func() (bool, error) {
+		return m.execSteamCMD(args)
+	})
+	m.finishTask(err)
+}
+
+func (m *Manager) buildServerUpdateArgs(branch string, validate bool) []string {
 	args := []string{
+		"+@sSteamCmdForcePlatformType", "linux",
 		"+force_install_dir", m.dstServerDir,
 		"+login", "anonymous",
+		"+app_info_update", "1",
 		"+app_update", DSTServerAppID,
 	}
 	if branch != "" && branch != "public" {
@@ -331,11 +350,7 @@ func (m *Manager) runServerUpdate(branch string, validate bool) {
 	if validate {
 		args = append(args, "validate")
 	}
-	args = append(args, "+quit")
-
-	m.publish(fmt.Sprintf("[walrus] Running SteamCMD update (app %s, branch=%s)...", DSTServerAppID, branch))
-	err := m.execSteamCMD(args)
-	m.finishTask(err)
+	return append(args, "+quit")
 }
 
 func (m *Manager) runMockServerUpdate(branch string) {
@@ -411,7 +426,9 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 		"+quit",
 	}
 	m.publish(fmt.Sprintf("[walrus] Downloading Workshop mod %s via SteamCMD...", workshopID))
-	err := m.execSteamCMD(args)
+	err := m.runWithMissingConfigRetry(func() (bool, error) {
+		return m.execSteamCMD(args)
+	})
 	if err != nil {
 		m.finishTask(err)
 		return "", err
@@ -433,36 +450,85 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 	return destDir, nil
 }
 
-func (m *Manager) execSteamCMD(args []string) error {
+func (m *Manager) runWithMissingConfigRetry(run func() (bool, error)) error {
+	missingConfig, err := run()
+	if err != nil && missingConfig {
+		m.publish("[walrus] SteamCMD reported 'Missing configuration'; clearing appcache and retrying once...")
+		_ = os.RemoveAll(filepath.Join(m.steamCMDHomeDir(), "Steam", "appcache"))
+		_, err = run()
+	}
+	return err
+}
+
+func (m *Manager) execSteamCMD(args []string) (bool, error) {
+	homeDir := m.steamCMDHomeDir()
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		return false, err
+	}
+
 	cmd := exec.Command(m.SteamCMDPath(), args...)
 	cmd.Dir = m.steamCMDDir
+	cmd.Env = setEnv(os.Environ(), "HOME", homeDir)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return err
+		return false, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := cmd.Start(); err != nil {
-		return err
+		return false, err
 	}
 
+	var missingConfig atomic.Bool
 	var wg sync.WaitGroup
 	pipe := func(r io.Reader) {
 		defer wg.Done()
 		sc := bufio.NewScanner(r)
 		sc.Buffer(make([]byte, 0, 64*1024), 512*1024)
 		for sc.Scan() {
-			m.publish(sc.Text())
+			raw := sc.Text()
+			clean := stripANSI(raw)
+			if raw != "" && strings.TrimSpace(clean) == "" {
+				continue
+			}
+			if strings.Contains(strings.ToLower(clean), "missing configuration") {
+				missingConfig.Store(true)
+			}
+			m.publish(clean)
 		}
 	}
 	wg.Add(2)
 	go pipe(stdout)
 	go pipe(stderr)
 	wg.Wait()
-	return cmd.Wait()
+	return missingConfig.Load(), cmd.Wait()
+}
+
+func stripANSI(s string) string {
+	return strings.TrimRight(ansiEscapeRe.ReplaceAllString(s, ""), "\r")
+}
+
+func setEnv(env []string, key, val string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			if !replaced {
+				out = append(out, prefix+val)
+				replaced = true
+			}
+			continue
+		}
+		out = append(out, entry)
+	}
+	if !replaced {
+		out = append(out, prefix+val)
+	}
+	return out
 }
 
 func (m *Manager) finishTask(err error) {

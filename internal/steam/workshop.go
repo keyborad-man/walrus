@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"walrus/internal/apperr"
@@ -27,16 +28,46 @@ type WorkshopItem struct {
 	IsClientOnly  bool     `json:"is_client_only"`
 }
 
+const (
+	defaultPublishedFileDetailsURL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+	defaultQueryFilesURL           = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+	curatedCacheTTL                = 6 * time.Hour
+	curatedRetryCooldown           = 2 * time.Minute
+)
+
 type WorkshopClient struct {
-	httpClient  *http.Client
-	runtimeMode string
+	httpClient        *http.Client
+	runtimeMode       string
+	defaultAPIKey     string
+	detailsEndpoint   string
+	queryEndpoint     string
+	mu                sync.Mutex
+	curatedCache      []WorkshopItem
+	curatedCachedAt   time.Time
+	curatedRetryAfter time.Time
 }
 
 func NewWorkshopClient(runtimeMode string) *WorkshopClient {
 	return &WorkshopClient{
-		httpClient:  &http.Client{Timeout: 12 * time.Second},
-		runtimeMode: runtimeMode,
+		httpClient:      &http.Client{Timeout: 12 * time.Second},
+		runtimeMode:     runtimeMode,
+		detailsEndpoint: defaultPublishedFileDetailsURL,
+		queryEndpoint:   defaultQueryFilesURL,
 	}
+}
+
+// SetDefaultAPIKey configures a fallback Steam Web API Key used when the user has not set a custom key in System Settings.
+func (c *WorkshopClient) SetDefaultAPIKey(key string) {
+	c.mu.Lock()
+	c.defaultAPIKey = strings.TrimSpace(key)
+	c.mu.Unlock()
+}
+
+func (c *WorkshopClient) getDefaultAPIKey() string {
+	c.mu.Lock()
+	k := c.defaultAPIKey
+	c.mu.Unlock()
+	return k
 }
 
 var (
@@ -71,10 +102,14 @@ func (c *WorkshopClient) GetPublishedFileDetails(ctx context.Context, ids []stri
 		form.Set(fmt.Sprintf("publishedfileids[%d]", i), id)
 	}
 
+	detailsURL := c.detailsEndpoint
+	if detailsURL == "" {
+		detailsURL = defaultPublishedFileDetailsURL
+	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		"https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/",
+		detailsURL,
 		strings.NewReader(form.Encode()),
 	)
 	if err != nil {
@@ -198,44 +233,91 @@ func (c *WorkshopClient) GetCollectionItems(ctx context.Context, input string) (
 	return ids, nil
 }
 
-// SearchWorkshop searches DST Workshop items via Steam Web API (requires Steam Web API Key, or returns curated samples in mock mode).
+// SearchWorkshop searches DST Workshop items via Steam Web API.
+// Precedence: user-configured apiKey > defaultAPIKey > curated popular catalog.
+// Direct Workshop ID / Steam URL queries always resolve via keyless GetPublishedFileDetails.
+// If a defaultAPIKey request fails or is rejected, it degrades gracefully to the curated catalog.
 func (c *WorkshopClient) SearchWorkshop(ctx context.Context, apiKey, query string, page int) ([]WorkshopItem, int, bool, error) {
 	if page <= 0 {
 		page = 1
 	}
-	apiKey = strings.TrimSpace(apiKey)
-	if apiKey == "" {
-		if c.runtimeMode == "mock" {
-			items := filterMockCatalog(query)
-			return items, len(items), true, nil
+	userKey := strings.TrimSpace(apiKey)
+	effectiveKey := userKey
+	usingDefaultKey := false
+	if effectiveKey == "" {
+		if defKey := c.getDefaultAPIKey(); defKey != "" {
+			effectiveKey = defKey
+			usingDefaultKey = true
 		}
-		return nil, 0, false, apperr.New(apperr.CodeSteamAPIKeyRequired, "Steam Web API Key is required in System Settings for Workshop keyword search (you can still add mods directly by Workshop ID, URL, or Collection without a key)")
+	}
+
+	trimmed := strings.TrimSpace(query)
+	if trimmed != "" {
+		if wid, err := ExtractWorkshopID(trimmed); err == nil {
+			items, err := c.GetPublishedFileDetails(ctx, []string{wid})
+			if err != nil {
+				return nil, 0, effectiveKey == "", err
+			}
+			return items, len(items), effectiveKey == "", nil
+		}
+	}
+
+	if effectiveKey == "" {
+		catalog := c.getCuratedCatalog(ctx)
+		items := filterCuratedCatalog(catalog, trimmed)
+		return items, len(items), true, nil
 	}
 
 	params := url.Values{}
-	params.Set("key", apiKey)
+	params.Set("key", effectiveKey)
 	params.Set("appid", DSTGameAppID)
-	params.Set("search_text", strings.TrimSpace(query))
+	params.Set("search_text", trimmed)
 	params.Set("page", strconv.Itoa(page))
 	params.Set("numperpage", "12")
 	params.Set("return_short_description", "1")
 	params.Set("return_tags", "1")
 	params.Set("return_metadata", "1")
-	params.Set("query_type", "1") // RankedByPublicationDate / Relevance when search_text set
+	if trimmed == "" {
+		params.Set("query_type", "9") // RankedByTotalUniqueSubscriptions (popular mods)
+	} else {
+		params.Set("query_type", "12") // RankedByTextSearch
+	}
 
-	endpoint := "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/?" + params.Encode()
+	queryBase := c.queryEndpoint
+	if queryBase == "" {
+		queryBase = defaultQueryFilesURL
+	}
+	endpoint := queryBase + "?" + params.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, 0, false, err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if usingDefaultKey {
+			catalog := c.getCuratedCatalog(ctx)
+			items := filterCuratedCatalog(catalog, trimmed)
+			return items, len(items), true, nil
+		}
 		return nil, 0, false, apperr.WrapDetail(apperr.CodeWorkshopSearchFailed, err, "steam workshop search failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
+		if usingDefaultKey {
+			catalog := c.getCuratedCatalog(ctx)
+			items := filterCuratedCatalog(catalog, trimmed)
+			return items, len(items), true, nil
+		}
 		return nil, 0, false, apperr.New(apperr.CodeSteamAPIKeyRejected, "Steam Web API Key rejected by Steam (HTTP 401/403)")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if usingDefaultKey {
+			catalog := c.getCuratedCatalog(ctx)
+			items := filterCuratedCatalog(catalog, trimmed)
+			return items, len(items), true, nil
+		}
+		return nil, 0, false, apperr.Newf(apperr.CodeWorkshopSearchFailed, nil, "steam workshop search returned HTTP %d", resp.StatusCode)
 	}
 
 	var payload struct {
@@ -300,49 +382,168 @@ func parseAnyInt64(v any) int64 {
 	}
 }
 
-var mockPopularMods = []WorkshopItem{
+var curatedPopularMods = []WorkshopItem{
 	{
 		WorkshopID: "378160973", ModID: "workshop-378160973",
 		Title: "Global Positions (全球定位)", Description: "Share map positions, pings, and campfire beacons with teammates.",
-		Subscriptions: 4820000, Tags: []string{"all_clients_require_mod", "map"},
+		Subscriptions: 8635000, Tags: []string{"all_clients_require_mod", "map"},
 	},
 	{
 		WorkshopID: "1207269058", ModID: "workshop-1207269058",
 		Title: "Simple Health Bar DST (简易血条)", Description: "Displays clean health bars and floating damage numbers.",
-		Subscriptions: 3910000, Tags: []string{"all_clients_require_mod", "ui"},
-	},
-	{
-		WorkshopID: "375850599", ModID: "workshop-375850599",
-		Title: "Extra Equip Slots (五格装备栏)", Description: "Adds dedicated backpack and amulet equipment slots.",
-		Subscriptions: 3250000, Tags: []string{"all_clients_require_mod", "gameplay"},
+		Subscriptions: 5350000, Tags: []string{"all_clients_require_mod", "ui"},
 	},
 	{
 		WorkshopID: "666155465", ModID: "workshop-666155465",
 		Title: "Show Me (Origin) (信息显示)", Description: "Inspect food stats, container contents, and creature timers.",
-		Subscriptions: 4120000, Tags: []string{"all_clients_require_mod", "info"},
+		Subscriptions: 3192000, Tags: []string{"all_clients_require_mod", "info"},
+	},
+	{
+		WorkshopID: "2189004162", ModID: "workshop-2189004162",
+		Title: "Insight (Show Me+) (详细信息增强)", Description: "Modern Show Me successor showing detailed item, creature, and respawn info.",
+		Subscriptions: 1530000, Tags: []string{"all_clients_require_mod", "info"},
 	},
 	{
 		WorkshopID: "1185229307", ModID: "workshop-1185229307",
 		Title: "Epic Healthbar (史诗级Boss血条)", Description: "Classic RPG boss health bar at the top of the screen.",
-		Subscriptions: 2740000, Tags: []string{"all_clients_require_mod", "boss"},
+		Subscriptions: 3756000, Tags: []string{"all_clients_require_mod", "boss"},
 	},
 	{
 		WorkshopID: "362175979", ModID: "workshop-362175979",
 		Title: "Wormhole Marks (虫洞标记)", Description: "Color-codes paired wormholes on the map automatically.",
-		Subscriptions: 2680000, Tags: []string{"all_clients_require_mod", "map"},
+		Subscriptions: 3589000, Tags: []string{"all_clients_require_mod", "map"},
+	},
+	{
+		WorkshopID: "374550642", ModID: "workshop-374550642",
+		Title: "Increased Stack size (物品堆叠上限)", Description: "Increases maximum item stack sizes in inventory and chests (default 99).",
+		Subscriptions: 2853000, Tags: []string{"all_clients_require_mod", "tweaks"},
+	},
+	{
+		WorkshopID: "501385076", ModID: "workshop-501385076",
+		Title: "Quick Pick (快速采集)", Description: "Speeds up harvesting grass, saplings, berry bushes, and more.",
+		Subscriptions: 2544000, Tags: []string{"all_clients_require_mod", "tweaks"},
+	},
+	{
+		WorkshopID: "1595631294", ModID: "workshop-1595631294",
+		Title: "Smart Minisign (智能小木牌)", Description: "Automatically draws chest contents on nearby mini signs for easy storage.",
+		Subscriptions: 1667000, Tags: []string{"all_clients_require_mod", "storage"},
+	},
+	{
+		WorkshopID: "569043634", ModID: "workshop-569043634",
+		Title: "Campfire Respawn (营火重生)", Description: "Allows ghost players to resurrect at lit campfires and endothermic fire pits.",
+		Subscriptions: 1589000, Tags: []string{"all_clients_require_mod", "gameplay"},
+	},
+	{
+		WorkshopID: "466732225", ModID: "workshop-466732225",
+		Title: "No Thermal Stone Durability (暖石无限耐久)", Description: "Removes durability loss on thermal stones across seasons.",
+		Subscriptions: 1562000, Tags: []string{"all_clients_require_mod", "tweaks"},
+	},
+	{
+		WorkshopID: "1530801499", ModID: "workshop-1530801499",
+		Title: "Fast Travel (GUI) (木牌传送)", Description: "Fast travel between discovered signpost locations via a clean UI.",
+		Subscriptions: 1034000, Tags: []string{"all_clients_require_mod", "utility"},
 	},
 }
 
-func filterMockCatalog(q string) []WorkshopItem {
+func cloneWorkshopItems(src []WorkshopItem) []WorkshopItem {
+	out := make([]WorkshopItem, len(src))
+	for i, it := range src {
+		if len(it.Tags) > 0 {
+			tags := make([]string, len(it.Tags))
+			copy(tags, it.Tags)
+			it.Tags = tags
+		}
+		out[i] = it
+	}
+	return out
+}
+
+func (c *WorkshopClient) getCuratedCatalog(ctx context.Context) []WorkshopItem {
+	now := time.Now()
+	c.mu.Lock()
+	if len(c.curatedCache) > 0 && now.Sub(c.curatedCachedAt) < curatedCacheTTL {
+		cached := cloneWorkshopItems(c.curatedCache)
+		c.mu.Unlock()
+		return cached
+	}
+	if c.runtimeMode == "mock" || (!c.curatedRetryAfter.IsZero() && now.Before(c.curatedRetryAfter)) {
+		c.mu.Unlock()
+		return cloneWorkshopItems(curatedPopularMods)
+	}
+	c.mu.Unlock()
+
+	ids := make([]string, len(curatedPopularMods))
+	for i, m := range curatedPopularMods {
+		ids[i] = m.WorkshopID
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	details, err := c.GetPublishedFileDetails(reqCtx, ids)
+	if err != nil || len(details) == 0 {
+		c.mu.Lock()
+		c.curatedRetryAfter = time.Now().Add(curatedRetryCooldown)
+		c.mu.Unlock()
+		return cloneWorkshopItems(curatedPopularMods)
+	}
+
+	byID := make(map[string]WorkshopItem, len(details))
+	for _, d := range details {
+		byID[d.WorkshopID] = d
+	}
+
+	merged := cloneWorkshopItems(curatedPopularMods)
+	for i := range merged {
+		if d, ok := byID[merged[i].WorkshopID]; ok {
+			if d.PreviewURL != "" {
+				merged[i].PreviewURL = d.PreviewURL
+			}
+			if d.TimeUpdated > 0 {
+				merged[i].TimeUpdated = d.TimeUpdated
+			}
+			if d.Subscriptions > 0 {
+				merged[i].Subscriptions = d.Subscriptions
+			}
+			if d.FileSize > 0 {
+				merged[i].FileSize = d.FileSize
+			}
+			if len(d.Tags) > 0 {
+				merged[i].Tags = d.Tags
+			}
+			merged[i].IsClientOnly = d.IsClientOnly
+		}
+	}
+
+	c.mu.Lock()
+	c.curatedCache = cloneWorkshopItems(merged)
+	c.curatedCachedAt = time.Now()
+	c.curatedRetryAfter = time.Time{}
+	c.mu.Unlock()
+
+	return merged
+}
+
+func filterCuratedCatalog(catalog []WorkshopItem, q string) []WorkshopItem {
 	q = strings.ToLower(strings.TrimSpace(q))
 	if q == "" {
-		return mockPopularMods
+		return catalog
 	}
-	var out []WorkshopItem
-	for _, it := range mockPopularMods {
-		if strings.Contains(strings.ToLower(it.Title), q) ||
+	out := make([]WorkshopItem, 0)
+	for _, it := range catalog {
+		matched := strings.Contains(strings.ToLower(it.Title), q) ||
 			strings.Contains(strings.ToLower(it.Description), q) ||
-			strings.Contains(it.WorkshopID, q) {
+			strings.Contains(it.WorkshopID, q) ||
+			strings.Contains(strings.ToLower(it.ModID), q)
+		if !matched {
+			for _, tag := range it.Tags {
+				if strings.Contains(strings.ToLower(tag), q) {
+					matched = true
+					break
+				}
+			}
+		}
+		if matched {
 			out = append(out, it)
 		}
 	}
@@ -350,8 +551,8 @@ func filterMockCatalog(q string) []WorkshopItem {
 }
 
 func mockFallbackDetails(ids []string) []WorkshopItem {
-	byID := make(map[string]WorkshopItem, len(mockPopularMods))
-	for _, m := range mockPopularMods {
+	byID := make(map[string]WorkshopItem, len(curatedPopularMods))
+	for _, m := range curatedPopularMods {
 		byID[m.WorkshopID] = m
 	}
 	out := make([]WorkshopItem, 0, len(ids))

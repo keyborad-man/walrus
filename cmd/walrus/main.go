@@ -63,6 +63,7 @@ func main() {
 
 	steamMgr := steam.NewManager(cfg.SteamCMDDir(), cfg.DSTServerDir(), driver.Mode())
 	workshopClient := steam.NewWorkshopClient(driver.Mode())
+	workshopClient.SetDefaultAPIKey(cfg.SteamAPIKey)
 
 	authSvc := auth.NewService(store, jwtSecret, cfg.CookieSecure)
 	webhookSvc := service.NewWebhookService(store)
