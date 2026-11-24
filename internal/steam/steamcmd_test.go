@@ -51,6 +51,36 @@ func TestMockServerUpdateNoDeadlockAndPersistsLogs(t *testing.T) {
 	t.Fatal("timed out waiting for mock SteamCMD update (possible deadlock)")
 }
 
+func TestCancelSteamCMDTaskReleasesLock(t *testing.T) {
+	tmp := t.TempDir()
+	mgr := NewManager(filepath.Join(tmp, "steamcmd"), filepath.Join(tmp, "dst-server"), "mock")
+
+	if mgr.CancelTask() {
+		t.Fatal("expected CancelTask() to return false when idle")
+	}
+	if err := mgr.UpdateDSTServer("public", true); err != nil {
+		t.Fatalf("start update: %v", err)
+	}
+	if !mgr.CancelTask() {
+		t.Fatal("expected CancelTask() to return true while running")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		st := mgr.Status("public")
+		if st.TaskState == TaskFailed {
+			// Lock must be released so a subsequent update can start immediately.
+			if err := mgr.UpdateDSTServer("public", false); err != nil {
+				t.Fatalf("expected lock released after cancel, got %v", err)
+			}
+			mgr.CancelTask()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected cancelled task to transition to failed, got %+v", mgr.Status("public"))
+}
+
 func TestBuildServerUpdateArgs(t *testing.T) {
 	mgr := NewManager("/data/steamcmd", "/data/dst-server", "linux")
 

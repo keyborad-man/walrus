@@ -69,6 +69,18 @@ func (s *Server) handleSteamUpdate(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"status": s.steamMgr.Status(branch)})
 }
 
+func (s *Server) handleSteamCancel(c *gin.Context) {
+	cancelled := s.steamMgr.CancelTask()
+	if cancelled {
+		u := auth.CurrentUser(c)
+		s.store.AddAuditLog(u.Username, "steam.cancel", "dst-server", "Cancelled active SteamCMD task", c.ClientIP())
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"cancelled": cancelled,
+		"status":    s.steamMgr.Status(s.currentBranch()),
+	})
+}
+
 // --- Visual World Config ---
 
 type patchWorldOverridesRequest struct {

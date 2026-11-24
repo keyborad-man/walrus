@@ -3,8 +3,6 @@ package steam
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -58,45 +56,7 @@ func TestParseAndMaskProxyURL(t *testing.T) {
 	}
 }
 
-func TestBuildProxyChainsConf(t *testing.T) {
-	mockLookup := func(host string) ([]net.IP, error) {
-		if host == "clash.local" {
-			return []net.IP{net.ParseIP("2001:db8::1"), net.ParseIP("10.0.0.5")}, nil
-		}
-		return nil, errors.New("no such host")
-	}
-
-	u, err := ParseProxyURL("socks5h://alice:p4ss@clash.local:7891")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	conf, err := BuildProxyChainsConf(u, mockLookup)
-	if err != nil {
-		t.Fatalf("BuildProxyChainsConf: %v", err)
-	}
-	if !strings.Contains(conf, "socks5 10.0.0.5 7891 alice p4ss\n") {
-		t.Fatalf("expected resolved IPv4 socks5 entry in conf:\n%s", conf)
-	}
-	if !strings.Contains(conf, "proxy_dns\n") || !strings.Contains(conf, "quiet_mode\n") {
-		t.Fatalf("expected proxy_dns and quiet_mode in conf:\n%s", conf)
-	}
-
-	uHTTP, _ := ParseProxyURL("http://127.0.0.1:7890")
-	confHTTP, err := BuildProxyChainsConf(uHTTP, mockLookup)
-	if err != nil {
-		t.Fatalf("BuildProxyChainsConf http: %v", err)
-	}
-	if !strings.Contains(confHTTP, "http 127.0.0.1 7890\n") {
-		t.Fatalf("expected http entry in conf:\n%s", confHTTP)
-	}
-
-	uHTTPS, _ := ParseProxyURL("https://127.0.0.1:8443")
-	if _, err := BuildProxyChainsConf(uHTTPS, mockLookup); !errors.Is(err, ErrProxyChainsUnsupportedScheme) {
-		t.Fatalf("expected ErrProxyChainsUnsupportedScheme for https://, got %v", err)
-	}
-}
-
-func TestWorkshopAndSteamManagerRouteThroughProxy(t *testing.T) {
+func TestWorkshopRoutesThroughProxyAndSteamCMDStaysDirect(t *testing.T) {
 	var proxyHits atomic.Int32
 	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxyHits.Add(1)
@@ -161,38 +121,20 @@ func TestWorkshopAndSteamManagerRouteThroughProxy(t *testing.T) {
 		t.Fatalf("expected 3 requests routed via proxy, got %d", proxyHits.Load())
 	}
 
-	// 3. SteamCMD Manager sets proxy env and masks password in published logs.
+	// 3. SteamCMD subprocess stays direct (never wrapped with proxychains or injected with panel proxy secret).
 	tmp := t.TempDir()
 	mgr := NewManager(filepath.Join(tmp, "steamcmd"), filepath.Join(tmp, "dst-server"), "linux")
 	secretProxy := "http://bob:SuperSecretPass@127.0.0.1:7890"
 	if err := mgr.SetProxy(secretProxy); err != nil {
 		t.Fatalf("mgr.SetProxy: %v", err)
 	}
-	cmd, cleanup, err := mgr.prepareSteamCMDCommand([]string{"+quit"}, mgr.steamCMDHomeDir(), mgr.ProxyURL())
-	if err != nil {
-		t.Fatalf("prepareSteamCMDCommand: %v", err)
+	cmd := mgr.prepareSteamCMDCommand(context.Background(), []string{"+quit"}, mgr.steamCMDHomeDir())
+	if filepath.Base(cmd.Path) != "steamcmd.sh" {
+		t.Fatalf("expected direct steamcmd.sh execution, got %q", cmd.Path)
 	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	hasHTTPProxy := false
-	hasAllProxy := false
 	for _, e := range cmd.Env {
-		if e == "HTTP_PROXY="+secretProxy {
-			hasHTTPProxy = true
-		}
-		if e == "ALL_PROXY="+secretProxy {
-			hasAllProxy = true
-		}
-	}
-	if !hasHTTPProxy || !hasAllProxy {
-		t.Fatalf("expected HTTP_PROXY and ALL_PROXY injected into SteamCMD env")
-	}
-
-	for _, line := range mgr.RecentLogs() {
-		if strings.Contains(line.Message, "SuperSecretPass") {
-			t.Fatalf("proxy password leaked into SteamCMD logs: %s", line.Message)
+		if strings.Contains(e, "SuperSecretPass") || strings.HasPrefix(e, "PROXYCHAINS_CONF_FILE=") {
+			t.Fatalf("SteamCMD env should not receive panel proxy or proxychains config: %s", e)
 		}
 	}
 }

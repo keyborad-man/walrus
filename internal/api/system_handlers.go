@@ -76,10 +76,9 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 	}
 	s.decoratePublicSettings(st)
 	c.JSON(http.StatusOK, gin.H{
-		"settings":          st,
-		"runtime_mode":      s.driver.Mode(),
-		"data_dir":          s.cfg.DataDir,
-		"proxychains_ready": s.steamMgr.ProxyChainsReady(),
+		"settings":     st,
+		"runtime_mode": s.driver.Mode(),
+		"data_dir":     s.cfg.DataDir,
 	})
 }
 
@@ -199,8 +198,7 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	updated, _ := s.store.GetSystemSettings(false)
 	s.decoratePublicSettings(updated)
 	c.JSON(http.StatusOK, gin.H{
-		"settings":          updated,
-		"proxychains_ready": s.steamMgr.ProxyChainsReady(),
+		"settings": updated,
 	})
 }
 

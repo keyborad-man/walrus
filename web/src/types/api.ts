@@ -202,8 +202,6 @@ export interface ProxyTestResult {
   status_code: number
   target: string
   proxy_url: string
-  proxychains_ready: boolean
-  proxychains_note?: string
 }
 
 export interface DockerCapability {

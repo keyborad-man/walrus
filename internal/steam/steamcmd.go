@@ -22,9 +22,11 @@ import (
 )
 
 const (
-	DSTServerAppID = "343050"
-	DSTGameAppID   = "322330"
-	KleiBuildsURL  = "https://s3.amazonaws.com/dstbuilds/builds.json"
+	DSTServerAppID             = "343050"
+	DSTGameAppID               = "322330"
+	KleiBuildsURL              = "https://s3.amazonaws.com/dstbuilds/builds.json"
+	defaultServerUpdateTimeout = 30 * time.Minute
+	defaultModDownloadTimeout  = 5 * time.Minute
 )
 
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
@@ -70,6 +72,7 @@ type Manager struct {
 	taskState     TaskState
 	taskKind      string
 	lastError     string
+	cancelTask    context.CancelFunc
 	remoteRelease string
 	remoteBeta    string
 	lastCheckedAt *time.Time
@@ -92,7 +95,8 @@ func NewManager(steamCMDDir, dstServerDir, runtimeMode string) *Manager {
 	}
 }
 
-// SetProxy updates the outbound network proxy used for Klei version checks and SteamCMD downloads.
+// SetProxy updates the outbound network proxy used for Klei version check HTTP requests.
+// SteamCMD itself always connects directly so Linux epoll sockets are not disrupted by LD_PRELOAD wrappers.
 // Pass an empty string to disable the panel-managed proxy.
 func (m *Manager) SetProxy(proxyURL string) error {
 	trimmed := strings.TrimSpace(proxyURL)
@@ -113,11 +117,6 @@ func (m *Manager) ProxyURL() string {
 	p := m.proxyURL
 	m.mu.RUnlock()
 	return p
-}
-
-// ProxyChainsReady reports whether proxychains4 is available for tunneling SteamCMD.
-func (m *Manager) ProxyChainsReady() bool {
-	return ProxyChainsAvailable()
 }
 
 func (m *Manager) getHTTPClient() *http.Client {
@@ -326,30 +325,51 @@ func maxNumericString(items []string) string {
 	return best
 }
 
+// CancelTask terminates any currently running SteamCMD task so the global lock is released promptly.
+func (m *Manager) CancelTask() bool {
+	m.mu.Lock()
+	if m.taskState != TaskRunning || m.cancelTask == nil {
+		m.mu.Unlock()
+		return false
+	}
+	cancel := m.cancelTask
+	m.mu.Unlock()
+
+	m.publish("[walrus] Cancelling active SteamCMD task...")
+	cancel()
+	return true
+}
+
 // UpdateDSTServer runs SteamCMD asynchronously to install or update the DST dedicated server.
 func (m *Manager) UpdateDSTServer(branch string, validate bool) error {
 	if branch == "" {
 		branch = "public"
 	}
+	taskCtx, cancel := context.WithTimeout(context.Background(), defaultServerUpdateTimeout)
 	m.mu.Lock()
 	if m.taskState == TaskRunning {
 		m.mu.Unlock()
+		cancel()
 		return apperr.New(apperr.CodeSteamCMDBusy, "a SteamCMD task is already running")
 	}
 	m.taskState = TaskRunning
 	m.taskKind = "server_update"
 	m.lastError = ""
 	m.logs = m.logs[:0]
+	m.cancelTask = cancel
 	m.mu.Unlock()
 	_ = os.Remove(filepath.Join(m.steamCMDDir, "last_run.log"))
 
-	go m.runServerUpdate(branch, validate)
+	go func() {
+		defer cancel()
+		m.runServerUpdate(taskCtx, branch, validate)
+	}()
 	return nil
 }
 
-func (m *Manager) runServerUpdate(branch string, validate bool) {
+func (m *Manager) runServerUpdate(ctx context.Context, branch string, validate bool) {
 	if m.runtimeMode == "mock" {
-		m.runMockServerUpdate(branch)
+		m.runMockServerUpdate(ctx, branch)
 		return
 	}
 
@@ -367,7 +387,7 @@ func (m *Manager) runServerUpdate(branch string, validate bool) {
 
 	m.publish(fmt.Sprintf("[walrus] Running SteamCMD update (app %s, branch=%s)...", DSTServerAppID, branch))
 	err := m.runWithMissingConfigRetry(func() (bool, error) {
-		return m.execSteamCMD(args)
+		return m.execSteamCMD(ctx, args)
 	})
 	m.finishTask(err)
 }
@@ -389,7 +409,7 @@ func (m *Manager) buildServerUpdateArgs(branch string, validate bool) []string {
 	return append(args, "+quit")
 }
 
-func (m *Manager) runMockServerUpdate(branch string) {
+func (m *Manager) runMockServerUpdate(ctx context.Context, branch string) {
 	m.mu.RLock()
 	targetVer := m.remoteRelease
 	if branch == "updatebeta" && m.remoteBeta != "" {
@@ -415,8 +435,21 @@ func (m *Manager) runMockServerUpdate(branch string) {
 	}
 
 	for _, line := range steps {
+		select {
+		case <-ctx.Done():
+			m.finishTask(ctx.Err())
+			return
+		default:
+		}
 		m.publish(line)
-		time.Sleep(350 * time.Millisecond)
+		timer := time.NewTimer(350 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			m.finishTask(ctx.Err())
+			return
+		case <-timer.C:
+		}
 	}
 
 	_ = os.MkdirAll(filepath.Join(m.dstServerDir, "mods"), 0o755)
@@ -432,9 +465,6 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 	}
 
 	if m.runtimeMode == "mock" {
-		if p := m.ProxyURL(); p != "" {
-			m.publish(fmt.Sprintf("[walrus] [Mock SteamCMD] Using network proxy: %s", MaskProxyURL(p)))
-		}
 		m.publish(fmt.Sprintf("[walrus] [Mock SteamCMD] Downloading Workshop item %s...", workshopID))
 		if err := os.MkdirAll(destDir, 0o755); err != nil {
 			return "", err
@@ -447,15 +477,19 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 		return destDir, nil
 	}
 
+	taskCtx, cancel := context.WithTimeout(ctx, defaultModDownloadTimeout)
 	m.mu.Lock()
 	if m.taskState == TaskRunning {
 		m.mu.Unlock()
+		cancel()
 		return "", apperr.New(apperr.CodeSteamCMDBusy, "another SteamCMD operation is currently running")
 	}
 	m.taskState = TaskRunning
 	m.taskKind = "mod_download"
 	m.lastError = ""
+	m.cancelTask = cancel
 	m.mu.Unlock()
+	defer cancel()
 
 	staging := filepath.Join(m.steamCMDDir, "workshop_cache")
 	args := []string{
@@ -466,7 +500,7 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 	}
 	m.publish(fmt.Sprintf("[walrus] Downloading Workshop mod %s via SteamCMD...", workshopID))
 	err := m.runWithMissingConfigRetry(func() (bool, error) {
-		return m.execSteamCMD(args)
+		return m.execSteamCMD(taskCtx, args)
 	})
 	if err != nil {
 		m.finishTask(err)
@@ -499,19 +533,13 @@ func (m *Manager) runWithMissingConfigRetry(run func() (bool, error)) error {
 	return err
 }
 
-func (m *Manager) execSteamCMD(args []string) (bool, error) {
+func (m *Manager) execSteamCMD(ctx context.Context, args []string) (bool, error) {
 	homeDir := m.steamCMDHomeDir()
 	if err := os.MkdirAll(homeDir, 0o755); err != nil {
 		return false, err
 	}
 
-	cmd, cleanup, err := m.prepareSteamCMDCommand(args, homeDir, m.ProxyURL())
-	if err != nil {
-		return false, err
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
+	cmd := m.prepareSteamCMDCommand(ctx, args, homeDir)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -547,98 +575,23 @@ func (m *Manager) execSteamCMD(args []string) (bool, error) {
 	go pipe(stdout)
 	go pipe(stderr)
 	wg.Wait()
-	return missingConfig.Load(), cmd.Wait()
+	waitErr := cmd.Wait()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return false, fmt.Errorf("SteamCMD timed out: %w", ctxErr)
+		}
+		return false, fmt.Errorf("SteamCMD cancelled: %w", ctxErr)
+	}
+	return missingConfig.Load(), waitErr
 }
 
-func (m *Manager) prepareSteamCMDCommand(args []string, homeDir, proxyURL string) (*exec.Cmd, func(), error) {
+func (m *Manager) prepareSteamCMDCommand(ctx context.Context, args []string, homeDir string) *exec.Cmd {
 	env := setEnv(os.Environ(), "HOME", homeDir)
-	proxyURL = strings.TrimSpace(proxyURL)
-
-	if proxyURL == "" {
-		cmd := exec.Command(m.SteamCMDPath(), args...)
-		cmd.Dir = m.steamCMDDir
-		cmd.Env = env
-		return cmd, nil, nil
-	}
-
-	m.publish(fmt.Sprintf("[walrus] Using network proxy: %s", MaskProxyURL(proxyURL)))
-	env = applyProxyEnv(env, proxyURL)
-
-	u, err := ParseProxyURL(proxyURL)
-	if err != nil || u == nil {
-		cmd := exec.Command(m.SteamCMDPath(), args...)
-		cmd.Dir = m.steamCMDDir
-		cmd.Env = env
-		return cmd, nil, nil
-	}
-
-	confBody, confErr := BuildProxyChainsConf(u, nil)
-	if confErr != nil {
-		if errors.Is(confErr, ErrProxyChainsUnsupportedScheme) {
-			m.publish("[walrus] Notice: proxychains4 does not support https:// proxy scheme; SteamCMD will only receive proxy environment variables (use http:// or socks5:// for full SteamCMD tunneling).")
-		} else {
-			m.publish(fmt.Sprintf("[walrus] Warning: failed to build proxychains4 config (%v); falling back to proxy environment variables.", confErr))
-		}
-		cmd := exec.Command(m.SteamCMDPath(), args...)
-		cmd.Dir = m.steamCMDDir
-		cmd.Env = env
-		return cmd, nil, nil
-	}
-
-	multiarchLib := multiarchProxyChainsLib()
-	pcBin := ""
-	if multiarchLib == "" {
-		pcBin = findProxyChainsBinary()
-	}
-	if multiarchLib == "" && pcBin == "" {
-		m.publish("[walrus] Notice: proxychains4 not found on host; SteamCMD may ignore HTTP_PROXY environment variables (install proxychains4 or use the official Docker image).")
-		cmd := exec.Command(m.SteamCMDPath(), args...)
-		cmd.Dir = m.steamCMDDir
-		cmd.Env = env
-		return cmd, nil, nil
-	}
-
-	_ = os.MkdirAll(m.steamCMDDir, 0o755)
-	tmpFile, err := os.CreateTemp(m.steamCMDDir, ".proxychains-*.conf")
-	if err != nil {
-		return nil, nil, fmt.Errorf("create temp proxychains config: %w", err)
-	}
-	confPath := tmpFile.Name()
-	cleanup := func() { _ = os.Remove(confPath) }
-	if err := tmpFile.Chmod(0o600); err != nil {
-		_ = tmpFile.Close()
-		cleanup()
-		return nil, nil, err
-	}
-	if _, err := tmpFile.WriteString(confBody); err != nil {
-		_ = tmpFile.Close()
-		cleanup()
-		return nil, nil, err
-	}
-	if err := tmpFile.Close(); err != nil {
-		cleanup()
-		return nil, nil, err
-	}
-
-	if multiarchLib != "" {
-		env = setEnv(env, "PROXYCHAINS_CONF_FILE", confPath)
-		env = setEnv(env, "PROXYCHAINS_QUIET_MODE", "1")
-		preload := multiarchLib
-		if existing := strings.TrimSpace(os.Getenv("LD_PRELOAD")); existing != "" {
-			preload = multiarchLib + " " + existing
-		}
-		env = setEnv(env, "LD_PRELOAD", preload)
-		cmd := exec.Command(m.SteamCMDPath(), args...)
-		cmd.Dir = m.steamCMDDir
-		cmd.Env = env
-		return cmd, cleanup, nil
-	}
-
-	pcArgs := append([]string{"-q", "-f", confPath, m.SteamCMDPath()}, args...)
-	cmd := exec.Command(pcBin, pcArgs...)
+	cmd := exec.CommandContext(ctx, m.SteamCMDPath(), args...)
 	cmd.Dir = m.steamCMDDir
 	cmd.Env = env
-	return cmd, cleanup, nil
+	configureCmdProcessGroup(cmd)
+	return cmd
 }
 
 func stripANSI(s string) string {
@@ -669,6 +622,7 @@ func (m *Manager) finishTask(err error) {
 	now := time.Now().UTC()
 	var msg string
 	m.mu.Lock()
+	m.cancelTask = nil
 	if err != nil {
 		m.taskState = TaskFailed
 		m.lastError = err.Error()

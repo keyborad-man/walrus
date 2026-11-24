@@ -80,7 +80,7 @@ export function SettingsPage() {
   const [proxyUrl, setProxyUrl] = useState('')
   const [clearProxyUrl, setClearProxyUrl] = useState(false)
   const [proxyTestFeedback, setProxyTestFeedback] = useState<
-    | { ok: true; latencyMs: number; target: string; httpsWarn: boolean }
+    | { ok: true; latencyMs: number; target: string }
     | { ok: false; message: string }
     | null
   >(null)
@@ -303,8 +303,7 @@ export function SettingsPage() {
     mutationFn: () => api.testProxy(proxyUrl.trim() || undefined),
     onSuccess: (res) => {
       const r = res.result
-      const httpsWarn = r.proxychains_note === 'https_scheme_unsupported_by_proxychains'
-      setProxyTestFeedback({ ok: true, latencyMs: r.latency_ms, target: r.target, httpsWarn })
+      setProxyTestFeedback({ ok: true, latencyMs: r.latency_ms, target: r.target })
       toast.success(t('settings.proxyTestSuccess', { target: r.target, latency: r.latency_ms }))
     },
     onError: (err: Error) => {
@@ -886,13 +885,6 @@ export function SettingsPage() {
               <p className="text-xs text-muted-foreground leading-relaxed">{t('settings.proxyUrlHint')}</p>
             )}
 
-            {proxyUrl.trim().toLowerCase().startsWith('https://') && (
-              <div className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:border-amber-500/35 dark:text-amber-200">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
-                <span>{t('settings.proxyTestHttpsWarn')}</span>
-              </div>
-            )}
-
             {proxyTestFeedback && (
               <div
                 role={proxyTestFeedback.ok ? 'status' : 'alert'}
@@ -908,26 +900,14 @@ export function SettingsPage() {
                 ) : (
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-red-700 dark:text-red-400" />
                 )}
-                <div className="space-y-0.5">
-                  <div>
-                    {proxyTestFeedback.ok
-                      ? t('settings.proxyTestSuccess', {
-                          target: proxyTestFeedback.target,
-                          latency: proxyTestFeedback.latencyMs,
-                        })
-                      : proxyTestFeedback.message}
-                  </div>
-                  {proxyTestFeedback.ok && proxyTestFeedback.httpsWarn && (
-                    <div className="text-amber-800 dark:text-amber-300">{t('settings.proxyTestHttpsWarn')}</div>
-                  )}
+                <div>
+                  {proxyTestFeedback.ok
+                    ? t('settings.proxyTestSuccess', {
+                        target: proxyTestFeedback.target,
+                        latency: proxyTestFeedback.latencyMs,
+                      })
+                    : proxyTestFeedback.message}
                 </div>
-              </div>
-            )}
-
-            {proxyEnabled && data.runtime_mode === 'linux' && !data.proxychains_ready && (
-              <div className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:border-amber-500/35 dark:text-amber-200">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
-                <span>{t('settings.proxyChainsMissingWarn')}</span>
               </div>
             )}
           </div>

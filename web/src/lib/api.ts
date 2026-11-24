@@ -115,11 +115,11 @@ export const api = {
     }),
   presets: () => request<{ presets: WorldPreset[] }>('/api/v1/presets'),
   getSettings: () =>
-    request<{ settings: SystemSettings; runtime_mode: string; data_dir: string; proxychains_ready: boolean }>(
+    request<{ settings: SystemSettings; runtime_mode: string; data_dir: string }>(
       '/api/v1/system/settings',
     ),
   updateSettings: (body: Partial<SystemSettings>) =>
-    request<{ settings: SystemSettings; proxychains_ready?: boolean }>('/api/v1/system/settings', {
+    request<{ settings: SystemSettings }>('/api/v1/system/settings', {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
@@ -225,6 +225,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  steamCancel: () => request<{ cancelled: boolean; status: SteamStatus }>('/api/v1/steam/cancel', { method: 'POST' }),
   wsSteamLogsUrl: () => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     return `${proto}//${window.location.host}/api/v1/ws/steam/logs`

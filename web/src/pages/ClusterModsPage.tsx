@@ -269,11 +269,31 @@ export function ClusterModsPage() {
     const workshopMods = mods.filter((m) => !m.is_local)
     if (workshopMods.length === 0) return
     setBulkBusy(true)
+    let succeeded = 0
+    let failed = 0
+    let lastErr = ''
     try {
-      await Promise.allSettled(workshopMods.map((m) => api.redownloadMod(m.mod_id, i18n.language)))
-      toast.success(t('mods.toastBulkRedownloaded', { count: workshopMods.length }))
+      // Run sequentially because SteamCMD only executes one task at a time.
+      for (const m of workshopMods) {
+        setRedownloadingModId(m.mod_id)
+        try {
+          await api.redownloadMod(m.mod_id, i18n.language)
+          succeeded++
+        } catch (err) {
+          failed++
+          lastErr = err instanceof Error ? err.message : String(err)
+        }
+      }
+      if (failed === 0) {
+        toast.success(t('mods.toastBulkRedownloaded', { count: succeeded }))
+      } else if (succeeded > 0) {
+        toast.warning(t('mods.toastBulkRedownloadPartial', { succeeded, failed, detail: lastErr }))
+      } else {
+        toast.error(lastErr || t('mods.toastBulkRedownloadFailed'))
+      }
       refreshMods()
     } finally {
+      setRedownloadingModId(null)
       setBulkBusy(false)
     }
   }

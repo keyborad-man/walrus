@@ -198,6 +198,7 @@ func (s *Server) Engine() *gin.Engine {
 			{
 				admin.POST("/steam/check", s.handleSteamCheck)
 				admin.POST("/steam/update", s.handleSteamUpdate)
+				admin.POST("/steam/cancel", s.handleSteamCancel)
 				admin.POST("/mods/local/upload", s.handleUploadLocalMod)
 				admin.DELETE("/mods/local/:modId", s.handleDeleteLocalMod)
 				admin.GET("/schedules", s.handleListAllSchedules)

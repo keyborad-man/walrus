@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { CheckCircle2, Download, RefreshCw, Terminal, AlertTriangle, Loader2 } from 'lucide-react'
+import { CheckCircle2, Download, RefreshCw, Terminal, AlertTriangle, Loader2, Square } from 'lucide-react'
 import { api } from '@/lib/api'
 import { formatDateTime } from '@/lib/utils'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -108,6 +108,18 @@ export function SteamPage() {
     onError: (err: Error) => toast.error(err.message),
   })
 
+  const cancelMut = useMutation({
+    mutationFn: api.steamCancel,
+    onSuccess: (res) => {
+      setLiveStatus(res.status)
+      void qc.invalidateQueries({ queryKey: ['steam-status'] })
+      if (res.cancelled) {
+        toast.success(t('steam.toastCancelled'))
+      }
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
+
   const isRunning = status?.task_state === 'running'
 
   return (
@@ -122,6 +134,12 @@ export function SteamPage() {
               <RefreshCw className={`h-4 w-4 ${checkMut.isPending ? 'animate-spin' : ''}`} />
               {t('steam.checkNow')}
             </Button>
+            {isRunning && (
+              <Button variant="destructive" disabled={cancelMut.isPending} onClick={() => cancelMut.mutate()}>
+                <Square className="h-3.5 w-3.5" />
+                {t('steam.cancelTask')}
+              </Button>
+            )}
             <Button disabled={isRunning || updateMut.isPending} onClick={() => updateMut.mutate()}>
               {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               {isRunning ? t('steam.updating') : t('steam.startUpdate')}
