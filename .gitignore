@@ -1,0 +1,29 @@
+# Binaries
+bin/
+dist/
+/walrus
+walrus.exe
+*.exe
+
+# Local dev data
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# Environment & IDE
+.env
+.env.local
+.idea/
+.vscode/
+*.log
+
+# Local tooling & planning notes
+.impeccable/
+plans/

@@ -1,0 +1,634 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-latin-var.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-latin-var.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+  --background: #fafafa;
+  --foreground: #111113;
+  --card: #ffffff;
+  --card-foreground: #111113;
+  --popover: #ffffff;
+  --popover-foreground: #111113;
+  --surface-sidebar: #f4f4f5;
+  --surface-elevated: #f4f4f5;
+  --surface-hover: #ededf0;
+  --surface-input: #ffffff;
+  --surface-highlight: rgba(255, 255, 255, 0);
+  --surface-terminal: #0c0c0e;
+  --surface-terminal-border: #232327;
+  --primary: #111113;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f1f4;
+  --secondary-foreground: #27272a;
+  --muted: #f4f4f5;
+  --muted-foreground: #686870;
+  --accent: #ededf0;
+  --accent-foreground: #111113;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e6e6e9;
+  --border-strong: #d4d4d9;
+  --input: #d4d4d9;
+  --ring: #52525b;
+  --radius: 0.5rem;
+  /* DST Auth Campfire & Forest tokens (Light woodcut ink) */
+  --dst-tree-far: #ecebe7;
+  --dst-tree-mid: #e3e1da;
+  --dst-tree-near: #d8d5cc;
+  --dst-tree-stroke: rgba(17, 17, 19, 0.11);
+  --dst-ember-core: rgba(217, 119, 6, 0.14);
+  --dst-ember-outer: rgba(217, 119, 6, 0.055);
+  --dst-spark: #b45309;
+  --dst-spark-warm: #c2410c;
+  --dst-moon: rgba(17, 17, 19, 0.14);
+  --dst-star: rgba(17, 17, 19, 0.24);
+  --dst-beam: rgba(180, 83, 9, 0.28);
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0a0a0b;
+  --foreground: #ededef;
+  --card: #111113;
+  --card-foreground: #ededef;
+  --popover: #141417;
+  --popover-foreground: #ededef;
+  --surface-sidebar: #0a0a0b;
+  --surface-elevated: #17171a;
+  --surface-hover: #1c1c20;
+  --surface-input: #0e0e10;
+  --surface-highlight: rgba(255, 255, 255, 0);
+  --surface-terminal: #08080a;
+  --surface-terminal-border: #1f1f23;
+  --primary: #ededef;
+  --primary-foreground: #0a0a0b;
+  --secondary: #18181b;
+  --secondary-foreground: #d4d4d8;
+  --muted: #161619;
+  --muted-foreground: #8a8a93;
+  --accent: #1c1c20;
+  --accent-foreground: #ededef;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #1f1f23;
+  --border-strong: #2e2e34;
+  --input: #27272c;
+  --ring: #a1a1aa;
+  /* DST Auth Campfire & Forest tokens (Dark obsidian night) */
+  --dst-tree-far: #121216;
+  --dst-tree-mid: #0e0e11;
+  --dst-tree-near: #070709;
+  --dst-tree-stroke: rgba(255, 255, 255, 0.055);
+  --dst-ember-core: rgba(234, 88, 12, 0.17);
+  --dst-ember-outer: rgba(217, 119, 6, 0.075);
+  --dst-spark: #fbbf24;
+  --dst-spark-warm: #fb923c;
+  --dst-moon: rgba(237, 237, 239, 0.18);
+  --dst-star: rgba(237, 237, 239, 0.45);
+  --dst-beam: rgba(245, 158, 11, 0.36);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei UI",
+    "Microsoft YaHei",
+    sans-serif;
+  --font-mono:
+    "JetBrains Mono",
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    monospace;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@theme static {
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+  --default-transition-duration: 150ms;
+  --default-transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11";
+    caret-color: var(--foreground);
+    text-rendering: optimizeLegibility;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--foreground) 16%, transparent);
+    color: var(--foreground);
+  }
+
+  a {
+    text-underline-offset: 3px;
+  }
+}
+
+/* Custom subtle scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted-foreground) 26%, transparent);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted-foreground) 48%, transparent);
+}
+
+/* Precision Instrument flat surfaces */
+.surface-card {
+  background-color: var(--card);
+  border: 1px solid var(--border);
+}
+
+.surface-interactive {
+  transition:
+    border-color 160ms var(--ease-out),
+    background-color 150ms ease,
+    transform 160ms var(--ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .surface-interactive:hover {
+    border-color: var(--border-strong);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+  .surface-lift:hover {
+    transform: translateY(-2px);
+  }
+}
+
+/* Subtle neutral architectural grid for auth surfaces */
+.dst-campfire-bg {
+  background-image:
+    radial-gradient(color-mix(in srgb, var(--foreground) 7%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+.dst-obsidian-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--foreground) 3.5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--foreground) 3.5%, transparent) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.dst-ember-strip {
+  /* Retained as neutral no-op class for backwards compatibility */
+}
+
+/* Quiet section label */
+.eyebrow {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
+}
+
+/* Live status subtle breathing ring */
+@keyframes dst-live-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  75%,
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+.dst-live-ring {
+  animation: dst-live-ring 2.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+/* Shimmer loading skeleton */
+@keyframes dst-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.dst-skeleton {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--secondary) 92%, transparent) 25%,
+    color-mix(in srgb, var(--muted-foreground) 12%, var(--secondary)) 50%,
+    color-mix(in srgb, var(--secondary) 92%, transparent) 75%
+  );
+  background-size: 200% 100%;
+  animation: dst-shimmer 1.6s linear infinite;
+}
+
+/* No full-page fade-in on route switch */
+.dst-page-enter {
+  /* intentionally instant for snappy console-tool navigation */
+}
+
+@layer utilities {
+  .pressable {
+    transition:
+      color 150ms ease,
+      background-color 150ms ease,
+      border-color 150ms ease,
+      box-shadow 150ms ease,
+      transform 140ms var(--ease-out),
+      scale 140ms var(--ease-out);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .pressable:active:not(:disabled) {
+      scale: 0.98;
+    }
+  }
+}
+
+/* Auth page choreographed entrances & DST campfire atmosphere (GPU-composited only) */
+@keyframes auth-enter-lead {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes auth-enter-support {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-enter-cta {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes auth-enter-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes auth-enter-scene {
+  from {
+    opacity: 0;
+    transform: scale(1.02);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes auth-horizon-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-100%) scaleX(0.6);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(100%) scaleX(1.1);
+  }
+}
+
+@keyframes auth-campfire-breathe {
+  0%,
+  100% {
+    opacity: 0.78;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  38% {
+    opacity: 1;
+    transform: translate3d(0, -5px, 0) scale(1.05);
+  }
+  68% {
+    opacity: 0.86;
+    transform: translate3d(0, -2px, 0) scale(1.015);
+  }
+}
+
+@keyframes auth-ember-rise {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.6);
+  }
+  18% {
+    opacity: var(--ember-op, 0.75);
+    transform: translate3d(var(--drift-x1, 8px), -35px, 0) scale(1);
+  }
+  75% {
+    opacity: var(--ember-op, 0.6);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--drift-x2, -12px), -180px, 0) scale(0.35);
+  }
+}
+
+@keyframes auth-firefly-float {
+  0%,
+  100% {
+    opacity: 0.15;
+    transform: translate3d(0, 0, 0) scale(0.85);
+  }
+  50% {
+    opacity: 0.85;
+    transform: translate3d(var(--fx, 10px), var(--fy, -12px), 0) scale(1.15);
+  }
+}
+
+@keyframes auth-star-twinkle {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@keyframes auth-form-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-6px);
+  }
+  45% {
+    transform: translateX(5px);
+  }
+  70% {
+    transform: translateX(-3px);
+  }
+  88% {
+    transform: translateX(2px);
+  }
+}
+
+@keyframes auth-alert-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.auth-enter-lead {
+  animation: auth-enter-lead 420ms var(--ease-out) 0ms both;
+}
+
+.auth-enter-support {
+  animation: auth-enter-support 380ms var(--ease-out) 70ms both;
+}
+
+.auth-enter-cta {
+  animation: auth-enter-cta 340ms var(--ease-out) 120ms both;
+}
+
+.auth-enter-fade {
+  animation: auth-enter-fade 520ms var(--ease-out) 0ms both;
+}
+
+.auth-enter-scene {
+  animation: auth-enter-scene 700ms var(--ease-out) 0ms both;
+}
+
+.auth-horizon-beam {
+  animation: auth-horizon-sweep 1100ms var(--ease-out) 120ms both;
+}
+
+.auth-campfire-breathe {
+  animation: auth-campfire-breathe 6.5s var(--ease-in-out) infinite;
+}
+
+.auth-ember-particle {
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+  animation: auth-ember-rise var(--dur, 7s) var(--ease-out) var(--delay, 0s) infinite;
+}
+
+.auth-firefly {
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+  animation: auth-firefly-float var(--dur, 5.5s) var(--ease-in-out) var(--delay, 0s) infinite;
+}
+
+.auth-star-twinkle {
+  animation: auth-star-twinkle var(--dur, 4.8s) ease-in-out var(--delay, 0s) infinite;
+}
+
+.auth-parallax {
+  transition: transform 320ms var(--ease-out);
+}
+
+.auth-form-shake {
+  animation: auth-form-shake 280ms var(--ease-out);
+}
+
+.auth-alert-enter {
+  animation: auth-alert-enter 180ms var(--ease-out) both;
+}
+
+.auth-logo-badge {
+  position: relative;
+  overflow: hidden;
+}
+
+.auth-logo-badge::after {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  background: linear-gradient(115deg, transparent 36%, rgba(255, 255, 255, 0.26) 50%, transparent 64%);
+  transform: translateX(-130%);
+  transition: transform 560ms var(--ease-out);
+  pointer-events: none;
+}
+
+.auth-btn-arrow {
+  transition: transform 180ms var(--ease-out);
+}
+
+.auth-btn-sheen {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.18) 50%, transparent 65%);
+  transform: translateX(-120%);
+  transition: transform 520ms var(--ease-out);
+}
+
+.dark .auth-btn-sheen {
+  background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.3) 50%, transparent 65%);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .auth-logo-badge:hover::after {
+    transform: translateX(130%);
+  }
+
+  .auth-submit-btn:hover:not(:disabled) .auth-btn-arrow {
+    transform: translateX(3px);
+  }
+
+  .auth-submit-btn:hover:not(:disabled) .auth-btn-sheen {
+    transform: translateX(120%);
+  }
+}
+
+@keyframes reduced-motion-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto !important;
+  }
+
+  .transition-transform {
+    transition-duration: 0.01ms !important;
+  }
+
+  .dst-live-ring {
+    animation: none !important;
+    opacity: 0 !important;
+  }
+
+  .dst-skeleton {
+    animation: none !important;
+    background: var(--secondary) !important;
+  }
+
+  .animate-spin {
+    animation: reduced-motion-pulse 1.8s ease-in-out infinite !important;
+  }
+
+  .auth-enter-lead,
+  .auth-enter-support,
+  .auth-enter-cta,
+  .auth-enter-scene,
+  .auth-alert-enter {
+    animation: auth-enter-fade 200ms ease both !important;
+    animation-delay: 0ms !important;
+  }
+
+  .auth-horizon-beam,
+  .auth-campfire-breathe,
+  .auth-ember-particle,
+  .auth-firefly,
+  .auth-star-twinkle,
+  .auth-form-shake {
+    animation: none !important;
+  }
+
+  .auth-ember-particle {
+    opacity: 0.35 !important;
+  }
+
+  .auth-parallax,
+  .auth-logo-badge::after,
+  .auth-btn-arrow,
+  .auth-btn-sheen {
+    transition-duration: 0.01ms !important;
+  }
+}

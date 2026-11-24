@@ -1,0 +1,23 @@
+services:
+  walrus:
+    image: ghcr.io/keyborad-man/walrus:latest
+    # 如需从本地源码自行构建，请注释掉上面的 image 并取消下方 build 注释：
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    container_name: walrus
+    restart: unless-stopped
+    # On Linux, host networking avoids Docker UDP proxy overhead and lets you expand
+    # the concurrent port pool without restarting the container.
+    # For bridge mode instead, comment out `network_mode: host` and uncomment `ports`.
+    network_mode: host
+    # ports:
+    #   - "8080:8080/tcp"
+    #   - "10990-11060:10990-11060/udp"
+    environment:
+      WALRUS_ADDR: ":8080"
+      WALRUS_DATA_DIR: "/data"
+      WALRUS_RUNTIME: "linux"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - ./data:/data
