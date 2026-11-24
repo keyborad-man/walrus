@@ -41,7 +41,7 @@ const FOCUSABLE_SELECTOR =
 
 export function AppShell() {
   const { t, i18n } = useTranslation()
-  const { user, runtimeMode, logout } = useAuth()
+  const { user, logout } = useAuth()
   const { theme, toggle: toggleTheme } = useTheme()
   const { guardAction } = useUnsavedGuard()
   const { id: activeClusterId } = useParams<{ id?: string }>()
@@ -164,8 +164,16 @@ export function AppShell() {
     queryFn: api.steamStatus,
     refetchInterval: 30000,
   })
+  const { data: versionData } = useQuery({
+    queryKey: ['system-version'],
+    queryFn: api.systemVersion,
+    refetchInterval: 60000,
+    retry: false,
+  })
   const clusters = clustersData?.clusters ?? []
   const updateNeeded = steamData?.status?.update_needed ?? false
+  const panelVersion = versionData?.info?.current_version
+  const panelUpdateAvailable = versionData?.info?.update_available ?? false
   const activeCluster = clusters.find((c) => c.cluster_id === activeClusterId)
 
   const currentSubPage = (() => {
@@ -266,14 +274,17 @@ export function AppShell() {
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-foreground text-background">
             <WalrusLogo className="h-[18px] w-[18px]" />
           </div>
-          <div className="min-w-0">
-            <div className="text-[13.5px] font-semibold tracking-[-0.015em] text-foreground truncate leading-tight">
-              {t('common.appName')}
-            </div>
-            <p className="text-[11px] text-muted-foreground leading-tight truncate mt-0.5">
-              {runtimeMode === 'mock' ? t('common.mockBadge') : t('common.linuxBadge')}
-            </p>
-          </div>
+          <span className="text-[13.5px] font-semibold tracking-[-0.015em] text-foreground truncate leading-tight">
+            {t('common.appName')}
+          </span>
+          {panelVersion && (
+            <span
+              title={versionData?.info?.commit && versionData.info.commit !== 'none' ? `${panelVersion} (${versionData.info.commit})` : panelVersion}
+              className="rounded bg-[var(--surface-hover)] px-1.5 py-0.5 font-mono text-[10.5px] leading-none text-muted-foreground shrink-0"
+            >
+              {panelVersion}
+            </span>
+          )}
         </Link>
         <button
           type="button"
@@ -476,7 +487,12 @@ export function AppShell() {
             </NavLink>
             <NavLink to="/settings" className={navLinkClass} onClick={(e) => guardedNavigate('/settings', e)}>
               <Settings className="h-4 w-4 shrink-0" />
-              <span>{t('nav.settings')}</span>
+              <span className="flex-1 truncate">{t('nav.settings')}</span>
+              {panelUpdateAvailable && (
+                <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400 shrink-0">
+                  {t('nav.panelUpdateBadge')}
+                </span>
+              )}
             </NavLink>
             <NavLink to="/audit" className={navLinkClass} onClick={(e) => guardedNavigate('/audit', e)}>
               <ScrollText className="h-4 w-4 shrink-0" />

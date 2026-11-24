@@ -58,7 +58,7 @@ func setupTestEngine(t *testing.T) (http.Handler, func()) {
 	cronSvc := service.NewCronService(store, fs, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
 	_ = cronSvc.Start()
 
-	srv := NewServer(cfg, store, authSvc, driver, clusterSvc, backupSvc, modSvc, fileSvc, cronSvc, webhookSvc, steamMgr, web.DistFS())
+	srv := NewServer(cfg, store, authSvc, driver, clusterSvc, backupSvc, modSvc, fileSvc, cronSvc, webhookSvc, steamMgr, nil, web.DistFS())
 	return srv.Engine(), func() {
 		cronSvc.Stop()
 		driver.ShutdownAll(context.Background())
@@ -165,6 +165,25 @@ func TestEndToEndFlowAndRBAC(t *testing.T) {
 	rec = doJSON(t, h, http.MethodGet, "/api/v1/system/settings", viewerTok, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer should get 403 on system settings, got %d", rec.Code)
+	}
+	// Viewer CAN view basic system version, but CANNOT trigger upgrade or check
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/system/version", viewerTok, nil)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"current_version"`)) {
+		t.Fatalf("viewer should get 200 on system version, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/system/upgrade", viewerTok, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("viewer should get 403 on system upgrade, got %d", rec.Code)
+	}
+	// Admin calling upgrade outside Docker returns structured UPGRADE_UNAVAILABLE (400)
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/system/upgrade", adminTok, nil)
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeUpgradeUnavailable)) {
+		t.Fatalf("expected 400 UPGRADE_UNAVAILABLE outside docker, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Public /healthz includes version field
+	rec = doJSON(t, h, http.MethodGet, "/healthz", "", nil)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"version"`)) {
+		t.Fatalf("expected /healthz to return version, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// 5. Admin starts cluster, creates backup, checks SPA fallback & API 404

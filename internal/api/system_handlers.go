@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"walrus/internal/apperr"
 	"walrus/internal/auth"
 	"walrus/internal/db"
+	"walrus/internal/updater"
 )
 
 func (s *Server) handleSystemMetrics(c *gin.Context) {
@@ -121,4 +124,52 @@ func (s *Server) handleListAuditLogs(c *gin.Context) {
 		logs = []db.AuditLog{}
 	}
 	c.JSON(http.StatusOK, gin.H{"logs": logs})
+}
+
+func (s *Server) handleSystemVersion(c *gin.Context) {
+	st := s.updaterSvc.Status(c.Request.Context())
+	u := auth.CurrentUser(c)
+	if u == nil || u.Role != db.RoleAdmin {
+		st.Docker = updater.DockerCapability{}
+		st.Upgrade = updater.UpgradeState{State: "idle"}
+	}
+	c.JSON(http.StatusOK, gin.H{"info": st})
+}
+
+func (s *Server) handleCheckSystemVersion(c *gin.Context) {
+	st, err := s.updaterSvc.CheckUpdate(c.Request.Context())
+	if err != nil {
+		respondError(c, http.StatusBadGateway, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"info": st})
+}
+
+type systemUpgradeRequest struct {
+	TargetImage string `json:"target_image"`
+}
+
+func (s *Server) handleSystemUpgrade(c *gin.Context) {
+	var req systemUpgradeRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		respondBindError(c, err)
+		return
+	}
+	st, err := s.updaterSvc.StartUpgrade(c.Request.Context(), req.TargetImage)
+	if err != nil {
+		code, _, _ := apperr.Extract(err, "")
+		switch code {
+		case apperr.CodeUpgradeInProgress:
+			respondError(c, http.StatusConflict, err)
+		case apperr.CodeUpgradeUnavailable, apperr.CodeInvalidTargetImage:
+			respondError(c, http.StatusBadRequest, err)
+		default:
+			respondError(c, http.StatusInternalServerError, err)
+		}
+		return
+	}
+
+	u := auth.CurrentUser(c)
+	s.store.AddAuditLog(u.Username, "system.upgrade", "docker", "Triggered one-click Docker upgrade to "+st.Upgrade.TargetImage, c.ClientIP())
+	c.JSON(http.StatusAccepted, gin.H{"info": st})
 }

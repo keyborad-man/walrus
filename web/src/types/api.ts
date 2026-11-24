@@ -190,6 +190,46 @@ export interface SystemSettings {
   backup_max_retain: number
 }
 
+export interface DockerCapability {
+  in_docker: boolean
+  socket_available: boolean
+  can_self_upgrade: boolean
+  container_id?: string
+  container_name?: string
+  current_image?: string
+  target_image?: string
+  unavailable_reason?: 'not_docker' | 'socket_not_mounted' | 'container_not_found' | string
+}
+
+export interface UpgradeState {
+  state: 'idle' | 'pulling' | 'restarting' | 'failed'
+  message?: string
+  error?: string
+  target_image?: string
+  started_at?: string
+}
+
+export interface SystemVersionInfo {
+  current_version: string
+  commit: string
+  build_time: string
+  go_version: string
+  os: string
+  arch: string
+  latest_version?: string
+  update_available: boolean
+  source?: 'github_release' | 'github_tag' | 'ghcr_latest' | 'none' | string
+  release_url?: string
+  release_notes?: string
+  published_at?: string
+  local_digest?: string
+  remote_digest?: string
+  last_checked_at?: string
+  last_check_error?: string
+  docker: DockerCapability
+  upgrade: UpgradeState
+}
+
 export interface AuditLog {
   id: number
   actor: string

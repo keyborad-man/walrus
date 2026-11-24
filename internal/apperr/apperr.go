@@ -34,8 +34,13 @@ const (
 	CodeCannotDisableSelf           = "CANNOT_DISABLE_SELF"
 	CodeCannotDeleteSelf            = "CANNOT_DELETE_SELF"
 
-	// System settings
-	CodeInvalidPortPoolRange = "INVALID_PORT_POOL_RANGE"
+	// System settings & Self-upgrade
+	CodeInvalidPortPoolRange     = "INVALID_PORT_POOL_RANGE"
+	CodeVersionCheckFailed       = "VERSION_CHECK_FAILED"
+	CodeUpgradeUnavailable       = "UPGRADE_UNAVAILABLE"
+	CodeUpgradeInProgress        = "UPGRADE_IN_PROGRESS"
+	CodeInvalidTargetImage       = "INVALID_TARGET_IMAGE"
+	CodeUpgradeTriggerFailed     = "UPGRADE_TRIGGER_FAILED"
 
 	// Clusters & Ports
 	CodeClusterNotFound      = "CLUSTER_NOT_FOUND"

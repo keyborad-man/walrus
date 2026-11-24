@@ -12,6 +12,9 @@ RUN npm run build
 FROM golang:1.24-bookworm AS backend
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG DEFAULT_STEAM_API_KEY=
+ARG WALRUS_VERSION=dev
+ARG WALRUS_COMMIT=none
+ARG WALRUS_BUILD_TIME=unknown
 ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -19,7 +22,7 @@ RUN go mod download
 COPY . ./
 COPY --from=frontend /src/web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-    -ldflags="-s -w -X walrus/internal/config.DefaultSteamAPIKey=${DEFAULT_STEAM_API_KEY}" \
+    -ldflags="-s -w -X walrus/internal/config.DefaultSteamAPIKey=${DEFAULT_STEAM_API_KEY} -X walrus/internal/version.Version=${WALRUS_VERSION} -X walrus/internal/version.Commit=${WALRUS_COMMIT} -X walrus/internal/version.BuildTime=${WALRUS_BUILD_TIME}" \
     -o /out/walrus ./cmd/walrus
 
 # Stage 3: Ubuntu runtime with SteamCMD & DST dedicated server libs

@@ -22,6 +22,7 @@
 - **受限文件浏览器**：严格限制在集群目录内（阻断路径穿越与符号链接逃逸），支持查看/下载崩溃日志与在线编辑配置文件
 - **Webhook 多平台告警**：内置 Discord / 飞书 / 钉钉 / 企业微信 / Telegram / Bark / 通用 JSON（HMAC-SHA256）模板，支持崩溃、启停、玩家进出、备份、版本更新事件推送与投递记录查询
 - **多账号 RBAC 与审计**：首次启动 `/setup` 创建超管，支持 `admin` / `operator` / `viewer` 角色与集群粒度授权、登录限流、密钥脱敏及操作审计日志
+- **版本检测与 Docker 一键升级**：支持展示当前面板版本号与构建信息、自动检测 GitHub Releases（并兼容 GHCR `latest` 镜像变更）；挂载 `/var/run/docker.sock` 后可在「系统设置」中一键拉取新镜像、优雅存档关服并安全替换容器（异常时自动回滚旧容器）
 
 ---
 
@@ -36,7 +37,7 @@ cd docker
 docker compose up -d
 ```
 
-后续更新到最新版本只需：
+后续更新到最新版本可直接点击面板「系统设置」中的 **一键升级镜像**（需保持 `docker-compose.yml` 中的 `/var/run/docker.sock` 挂载），或手动执行：
 
 ```bash
 cd docker

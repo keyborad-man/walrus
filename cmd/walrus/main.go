@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,11 +19,18 @@ import (
 	"walrus/internal/runtime"
 	"walrus/internal/service"
 	"walrus/internal/steam"
+	"walrus/internal/updater"
+	"walrus/internal/version"
 	"walrus/web"
 )
 
 func main() {
 	cfg := config.Load()
+
+	if cfg.ShowVersion {
+		fmt.Println(version.Summary())
+		return
+	}
 
 	logLevel := slog.LevelInfo
 	if cfg.DevMode {
@@ -30,6 +38,15 @@ func main() {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
 	slog.SetDefault(logger)
+
+	if cfg.UpgradeHelper {
+		if err := updater.RunUpgradeHelper(); err != nil {
+			slog.Error("walrus upgrade helper failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("walrus upgrade helper completed successfully")
+		return
+	}
 
 	if err := cfg.EnsureDirs(); err != nil {
 		slog.Error("failed to initialize data directories", "dir", cfg.DataDir, "err", err)
@@ -107,14 +124,40 @@ func main() {
 		}
 	}()
 
-	srv := api.NewServer(cfg, store, authSvc, driver, clusterSvc, backupSvc, modSvc, fileSvc, cronSvc, webhookSvc, steamMgr, web.DistFS())
+	updaterSvc := updater.NewService(cfg.GitHubRepo, cfg.DockerImage, cfg.DockerSock, driver.Mode())
+
+	// Background initial Walrus panel version check + 6-hour polling loop
+	go func() {
+		checkPanel := func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			if st, err := updaterSvc.CheckUpdate(ctx); err == nil && st.UpdateAvailable {
+				slog.Info("new walrus panel version available",
+					"current", st.CurrentVersion,
+					"latest", st.LatestVersion,
+					"source", st.Source,
+				)
+			}
+		}
+		checkPanel()
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			checkPanel()
+		}
+	}()
+
+	srv := api.NewServer(cfg, store, authSvc, driver, clusterSvc, backupSvc, modSvc, fileSvc, cronSvc, webhookSvc, steamMgr, updaterSvc, web.DistFS())
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Engine(),
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 
+	verInfo := version.Current()
 	slog.Info("walrus starting",
+		"version", verInfo.Version,
+		"commit", verInfo.Commit,
 		"addr", cfg.Addr,
 		"data_dir", cfg.DataDir,
 		"runtime", driver.Mode(),

@@ -1,10 +1,24 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { ChevronDown, HelpCircle, KeyRound, Network, Save, ServerCog } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowUpCircle,
+  CheckCircle2,
+  ChevronDown,
+  ExternalLink,
+  HelpCircle,
+  KeyRound,
+  Loader2,
+  Network,
+  RefreshCw,
+  Save,
+  ServerCog,
+  Terminal,
+} from 'lucide-react'
 import { api } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, formatDateTime, getClusterHealth } from '@/lib/utils'
 import { useRegisterUnsaved } from '@/hooks/useUnsavedGuard'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -12,10 +26,13 @@ import { Input, Label, SecretInput, Select } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { CopyButton } from '@/components/ui/copy-button'
 import { CollapsibleContent } from '@/components/ui/collapsible'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { StickySaveBar } from '@/components/StickySaveBar'
 import { QueryErrorCard } from '@/components/QueryErrorCard'
 import { PageHeader } from '@/components/PageHeader'
 import { PageCardsSkeleton } from '@/components/ui/skeleton'
+
+const MANUAL_UPGRADE_CMD = 'docker compose pull && docker compose up -d'
 
 export function SettingsPage() {
   const { t } = useTranslation()
@@ -24,6 +41,15 @@ export function SettingsPage() {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['system-settings'],
     queryFn: api.getSettings,
+  })
+  const { data: versionData, refetch: refetchVersion } = useQuery({
+    queryKey: ['system-version'],
+    queryFn: api.systemVersion,
+    retry: false,
+  })
+  const { data: clustersData } = useQuery({
+    queryKey: ['clusters'],
+    queryFn: api.listClusters,
   })
 
   const [portStart, setPortStart] = useState(10990)
@@ -36,6 +62,138 @@ export function SettingsPage() {
   const [autoUpdate, setAutoUpdate] = useState('manual')
   const [backupRetain, setBackupRetain] = useState(20)
   const [showTokenGuide, setShowTokenGuide] = useState(false)
+  const [showReleaseNotes, setShowReleaseNotes] = useState(false)
+  const [confirmUpgradeOpen, setConfirmUpgradeOpen] = useState(false)
+  const [upgradePhase, setUpgradePhase] = useState<'idle' | 'pulling' | 'restarting' | 'reconnecting' | 'failed'>('idle')
+  const [upgradeMessage, setUpgradeMessage] = useState('')
+  const [upgradeError, setUpgradeError] = useState('')
+  const upgradeStartVersionRef = useRef<string>('')
+  const seenDisconnectRef = useRef<boolean>(false)
+  const restartingAtRef = useRef<number>(0)
+
+  const versionInfo = versionData?.info
+  const runningClusterCount = useMemo(() => {
+    const list = clustersData?.clusters ?? []
+    return list.filter((c) => {
+      const h = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
+      return h === 'running' || h === 'starting' || h === 'degraded'
+    }).length
+  }, [clustersData])
+
+  // Sync backend-reported active upgrade state if user refreshes while pulling/restarting.
+  useEffect(() => {
+    const st = versionInfo?.upgrade?.state
+    if (!st || st === 'idle') return
+    if (st === 'pulling' && upgradePhase === 'idle') {
+      upgradeStartVersionRef.current = versionInfo?.current_version ?? ''
+      setUpgradePhase('pulling')
+      setUpgradeMessage(versionInfo?.upgrade?.message || '')
+      setUpgradeError('')
+    } else if (st === 'restarting' && upgradePhase !== 'reconnecting') {
+      upgradeStartVersionRef.current = versionInfo?.current_version ?? ''
+      restartingAtRef.current = Date.now()
+      setUpgradePhase('restarting')
+      setUpgradeMessage(versionInfo?.upgrade?.message || '')
+      setUpgradeError('')
+    } else if (st === 'failed' && upgradePhase === 'pulling') {
+      setUpgradePhase('failed')
+      setUpgradeError(versionInfo?.upgrade?.error || versionInfo?.upgrade?.message || t('settings.upgradeFailed'))
+    }
+  }, [versionInfo, upgradePhase, t])
+
+  // Poll upgrade progress during pulling -> restarting -> reconnecting -> reload.
+  useEffect(() => {
+    if (upgradePhase !== 'pulling' && upgradePhase !== 'restarting' && upgradePhase !== 'reconnecting') return
+    let cancelled = false
+
+    const timer = window.setInterval(async () => {
+      if (cancelled) return
+
+      if (upgradePhase === 'pulling') {
+        try {
+          const res = await api.systemVersion()
+          if (cancelled) return
+          qc.setQueryData(['system-version'], res)
+          const up = res.info.upgrade
+          if (up.state === 'pulling') {
+            setUpgradeMessage(up.message || '')
+          } else if (up.state === 'restarting') {
+            restartingAtRef.current = Date.now()
+            setUpgradePhase('restarting')
+            setUpgradeMessage(up.message || '')
+          } else if (up.state === 'failed') {
+            setUpgradePhase('failed')
+            setUpgradeError(up.error || up.message || t('settings.upgradeFailed'))
+          }
+        } catch {
+          seenDisconnectRef.current = true
+          restartingAtRef.current = Date.now()
+          setUpgradePhase('reconnecting')
+        }
+        return
+      }
+
+      // restarting or reconnecting: probe /healthz until the new container responds
+      try {
+        const hz = await api.healthz()
+        if (cancelled) return
+        const versionChanged =
+          Boolean(upgradeStartVersionRef.current) && Boolean(hz.version) && hz.version !== upgradeStartVersionRef.current
+        const waitedEnough = restartingAtRef.current > 0 && Date.now() - restartingAtRef.current > 8000
+        if (seenDisconnectRef.current || versionChanged || waitedEnough) {
+          toast.success(t('settings.upgradeComplete'))
+          setUpgradePhase('idle')
+          window.setTimeout(() => {
+            window.location.reload()
+          }, 900)
+        }
+      } catch {
+        seenDisconnectRef.current = true
+        if (upgradePhase !== 'reconnecting') {
+          setUpgradePhase('reconnecting')
+        }
+      }
+    }, upgradePhase === 'pulling' ? 1500 : 2000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [upgradePhase, qc, t])
+
+  const checkVersionMut = useMutation({
+    mutationFn: api.checkSystemVersion,
+    onSuccess: (res) => {
+      qc.setQueryData(['system-version'], res)
+      if (res.info.update_available) {
+        toast.success(t('settings.checkUpdateDoneAvailable', { version: res.info.latest_version || 'latest' }))
+      } else {
+        toast.success(t('settings.checkUpdateDoneUpToDate'))
+      }
+    },
+    onError: (err: Error) => {
+      void refetchVersion()
+      toast.error(err.message)
+    },
+  })
+
+  const upgradeMut = useMutation({
+    mutationFn: () => api.triggerSystemUpgrade(versionInfo?.docker?.target_image || undefined),
+    onSuccess: (res) => {
+      setConfirmUpgradeOpen(false)
+      qc.setQueryData(['system-version'], res)
+      upgradeStartVersionRef.current = res.info.current_version
+      seenDisconnectRef.current = false
+      restartingAtRef.current = 0
+      setUpgradeError('')
+      setUpgradeMessage(res.info.upgrade.message || '')
+      setUpgradePhase('pulling')
+    },
+    onError: (err: Error) => {
+      setConfirmUpgradeOpen(false)
+      toast.error(err.message)
+    },
+  })
 
   const resetFromData = () => {
     if (!data?.settings) return
@@ -153,6 +311,12 @@ export function SettingsPage() {
           <Badge variant={data.runtime_mode === 'mock' ? 'warning' : 'success'}>
             {data.runtime_mode === 'mock' ? t('common.mockBadge') : t('common.linuxBadge')}
           </Badge>
+          {versionInfo && (
+            <Badge variant="secondary" className="font-mono">
+              {versionInfo.current_version}
+              {versionInfo.commit && versionInfo.commit !== 'none' ? ` · ${versionInfo.commit}` : ''}
+            </Badge>
+          )}
           <div className="flex items-start gap-1.5 min-w-0 text-muted-foreground">
             <span className="shrink-0 pt-0.5">{t('settings.dataDir')}:</span>
             <code className="font-mono text-foreground break-all pt-0.5">{data.data_dir}</code>
@@ -160,6 +324,234 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Walrus Version & Docker One-Click Upgrade */}
+      {versionInfo && (
+        <Card id="version">
+          <CardHeader className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <CardTitle className="flex items-center gap-2 flex-wrap">
+                <ArrowUpCircle className="h-4 w-4 text-primary shrink-0" />
+                <span>{t('settings.versionSection')}</span>
+                {versionInfo.update_available ? (
+                  <Badge variant="warning">
+                    {t('settings.statusUpdateAvailable', { version: versionInfo.latest_version || 'latest' })}
+                  </Badge>
+                ) : versionInfo.last_checked_at && !versionInfo.last_check_error ? (
+                  <Badge variant="success">
+                    <CheckCircle2 className="h-3 w-3" />
+                    {t('settings.statusUpToDate')}
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary">{t('settings.statusNotChecked')}</Badge>
+                )}
+              </CardTitle>
+              <CardDescription>{t('settings.versionSectionHint')}</CardDescription>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 flex-wrap">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  checkVersionMut.isPending ||
+                  upgradePhase === 'pulling' ||
+                  upgradePhase === 'restarting' ||
+                  upgradePhase === 'reconnecting'
+                }
+                onClick={() => checkVersionMut.mutate()}
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', checkVersionMut.isPending && 'animate-spin')} />
+                {checkVersionMut.isPending ? t('settings.checkingUpdate') : t('settings.checkUpdate')}
+              </Button>
+              {versionInfo.docker.can_self_upgrade && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={versionInfo.update_available ? 'default' : 'outline'}
+                  disabled={
+                    upgradeMut.isPending ||
+                    upgradePhase === 'pulling' ||
+                    upgradePhase === 'restarting' ||
+                    upgradePhase === 'reconnecting'
+                  }
+                  onClick={() => setConfirmUpgradeOpen(true)}
+                >
+                  {upgradePhase === 'pulling' || upgradePhase === 'restarting' || upgradePhase === 'reconnecting' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <ArrowUpCircle className="h-3.5 w-3.5" />
+                  )}
+                  {upgradePhase === 'pulling' || upgradePhase === 'restarting' || upgradePhase === 'reconnecting'
+                    ? t('settings.upgrading')
+                    : versionInfo.update_available
+                      ? t('settings.upgradeNow')
+                      : t('settings.reinstallLatest')}
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+
+          <CardContent className="space-y-4 text-xs">
+            {/* Version Metadata Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 rounded-lg border border-border bg-secondary/25 p-3">
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-muted-foreground">{t('settings.currentVersion')}</div>
+                <div className="font-mono font-medium text-foreground truncate">
+                  {versionInfo.current_version}
+                  {versionInfo.commit && versionInfo.commit !== 'none' ? ` (${versionInfo.commit})` : ''}
+                </div>
+              </div>
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-muted-foreground">{t('settings.latestVersion')}</div>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="font-mono font-medium text-foreground truncate">
+                    {versionInfo.latest_version || '—'}
+                  </span>
+                  {versionInfo.source && versionInfo.source !== 'none' && (
+                    <Badge variant="muted" className="text-[10.5px] px-1.5 py-0">
+                      {t(`settings.sourceLabels.${versionInfo.source}`, versionInfo.source)}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-muted-foreground">{t('settings.buildTime')}</div>
+                <div className="font-mono text-foreground truncate">
+                  {versionInfo.build_time && versionInfo.build_time !== 'unknown'
+                    ? formatDateTime(versionInfo.build_time)
+                    : '—'}
+                </div>
+              </div>
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-muted-foreground">{t('settings.lastChecked')}</div>
+                <div className="font-mono text-foreground truncate">
+                  {versionInfo.last_checked_at ? formatDateTime(versionInfo.last_checked_at) : '—'}
+                </div>
+              </div>
+            </div>
+
+            {/* Current / Target Docker Image Info */}
+            {versionInfo.docker.in_docker && (
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-muted-foreground">
+                {versionInfo.docker.current_image && (
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="shrink-0">{t('settings.currentImage')}:</span>
+                    <code className="font-mono text-foreground break-all">{versionInfo.docker.current_image}</code>
+                  </div>
+                )}
+                {versionInfo.docker.target_image && (
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="shrink-0">{t('settings.targetImage')}:</span>
+                    <code className="font-mono text-foreground break-all">{versionInfo.docker.target_image}</code>
+                  </div>
+                )}
+                {versionInfo.docker.can_self_upgrade && (
+                  <Badge variant="success" className="text-[11px]">
+                    {t('settings.dockerUpgradeReady')}
+                  </Badge>
+                )}
+              </div>
+            )}
+
+            {/* Release Link & Collapsible Release Notes */}
+            {(versionInfo.release_url || versionInfo.release_notes) && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-3 flex-wrap">
+                  {versionInfo.release_notes && (
+                    <button
+                      type="button"
+                      aria-expanded={showReleaseNotes}
+                      onClick={() => setShowReleaseNotes((v) => !v)}
+                      className="inline-flex items-center gap-1 rounded text-xs font-medium text-primary hover:underline cursor-pointer"
+                    >
+                      <span>{t('settings.releaseNotesToggle')}</span>
+                      <ChevronDown
+                        className={cn(
+                          'h-3.5 w-3.5 transition-transform duration-200 ease-out',
+                          showReleaseNotes && 'rotate-180',
+                        )}
+                      />
+                    </button>
+                  )}
+                  {versionInfo.release_url && (
+                    <a
+                      href={versionInfo.release_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:underline"
+                    >
+                      <span>{t('settings.viewRelease')}</span>
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
+                {versionInfo.release_notes && (
+                  <CollapsibleContent open={showReleaseNotes}>
+                    <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-secondary/35 p-3 font-mono text-[11.5px] leading-relaxed text-foreground">
+                      {versionInfo.release_notes}
+                    </pre>
+                  </CollapsibleContent>
+                )}
+              </div>
+            )}
+
+            {/* Live Upgrade Progress / Failure Status */}
+            {(upgradePhase === 'pulling' || upgradePhase === 'restarting' || upgradePhase === 'reconnecting') && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex items-start gap-2.5 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3.5 py-2.5 text-amber-950 dark:border-amber-500/35 dark:text-amber-200"
+              >
+                <Loader2 className="h-4 w-4 shrink-0 mt-0.5 animate-spin text-amber-700 dark:text-amber-400" />
+                <div className="space-y-0.5 min-w-0">
+                  <div className="font-medium">
+                    {upgradePhase === 'pulling'
+                      ? t('settings.pullingImage')
+                      : upgradePhase === 'restarting'
+                        ? t('settings.restartingContainer')
+                        : t('settings.reconnecting')}
+                  </div>
+                  {upgradeMessage && (
+                    <div className="font-mono text-[11px] opacity-85 break-all">{upgradeMessage}</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {upgradePhase === 'failed' && (
+              <div
+                role="alert"
+                className="flex items-start gap-2.5 rounded-lg border border-red-600/30 bg-red-600/10 px-3.5 py-2.5 text-red-900 dark:border-red-500/35 dark:text-red-200"
+              >
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-red-700 dark:text-red-400" />
+                <div className="space-y-0.5 min-w-0">
+                  <div className="font-medium">{t('settings.upgradeFailed')}</div>
+                  {upgradeError && <div className="font-mono text-[11px] break-all">{upgradeError}</div>}
+                </div>
+              </div>
+            )}
+
+            {/* Graceful Fallback when Docker Socket is not mounted or not in Docker */}
+            {!versionInfo.docker.can_self_upgrade && (
+              <div className="space-y-2 rounded-lg border border-border bg-secondary/35 p-3">
+                <div className="flex items-start gap-2 text-muted-foreground leading-relaxed">
+                  <Terminal className="h-3.5 w-3.5 shrink-0 mt-0.5 text-foreground" />
+                  <span>
+                    {versionInfo.docker.unavailable_reason === 'socket_not_mounted'
+                      ? `${t('settings.dockerSocketMissing')} ${t('settings.dockerSocketGuide')}`
+                      : t('settings.dockerNotInContainer')}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2.5 py-1.5">
+                  <code className="font-mono text-[11.5px] text-foreground break-all">{MANUAL_UPGRADE_CMD}</code>
+                  <CopyButton value={MANUAL_UPGRADE_CMD} />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Port Pool */}
       <Card>
@@ -367,6 +759,23 @@ export function SettingsPage() {
         onSave={() => {
           if (portPoolValid) saveMut.mutate()
         }}
+      />
+
+      <ConfirmDialog
+        open={confirmUpgradeOpen}
+        onClose={() => setConfirmUpgradeOpen(false)}
+        onConfirm={() => upgradeMut.mutate()}
+        loading={upgradeMut.isPending}
+        tone="warning"
+        title={t('settings.upgradeConfirmTitle')}
+        description={
+          runningClusterCount > 0
+            ? `${t('settings.upgradeConfirmRunningWarn', { count: runningClusterCount })}\n\n${t('settings.upgradeConfirmDesc', { image: versionInfo?.docker?.target_image || 'ghcr.io/keyborad-man/walrus:latest' })}`
+            : t('settings.upgradeConfirmDesc', {
+                image: versionInfo?.docker?.target_image || 'ghcr.io/keyborad-man/walrus:latest',
+              })
+        }
+        confirmLabel={t('settings.upgradeNow')}
       />
     </form>
   )

@@ -41,6 +41,7 @@ import { Switch } from '@/components/ui/switch'
 import { Dialog } from '@/components/ui/dialog'
 import { TabList } from '@/components/ui/tabs'
 import { CollapsibleContent } from '@/components/ui/collapsible'
+import { copyTextWithFallback } from '@/components/ui/copy-button'
 import { SearchInput } from '@/components/SearchInput'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { ShardStateBadge } from '@/components/StatusBadge'
@@ -323,10 +324,10 @@ export function ClusterConsolePage() {
   const copyEntries = async (rows: LogEntry[]) => {
     if (rows.length === 0) return
     const text = rows.map((r) => r.message).join('\n')
-    try {
-      await navigator.clipboard.writeText(text)
+    const ok = await copyTextWithFallback(text)
+    if (ok) {
       toast.success(t('console.copiedLogs', { count: rows.length }))
-    } catch {
+    } else {
       toast.error(t('common.copyFailed'))
     }
   }

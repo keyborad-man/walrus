@@ -18,6 +18,7 @@ import type {
   ServerINI,
   SteamStatus,
   SystemSettings,
+  SystemVersionInfo,
   User,
   UserClusterPermission,
   UserWithPermissions,
@@ -101,7 +102,16 @@ export const api = {
   me: () => request<{ user: User; permissions: UserClusterPermission[] }>('/api/v1/auth/me'),
 
   // System
+  healthz: () => request<{ status: string; runtime: string; version: string }>('/healthz'),
   metrics: () => request<{ metrics: HostMetrics }>('/api/v1/system/metrics'),
+  systemVersion: () => request<{ info: SystemVersionInfo }>('/api/v1/system/version'),
+  checkSystemVersion: () =>
+    request<{ info: SystemVersionInfo }>('/api/v1/system/version/check', { method: 'POST' }),
+  triggerSystemUpgrade: (target_image?: string) =>
+    request<{ info: SystemVersionInfo }>('/api/v1/system/upgrade', {
+      method: 'POST',
+      body: JSON.stringify(target_image ? { target_image } : {}),
+    }),
   presets: () => request<{ presets: WorldPreset[] }>('/api/v1/presets'),
   getSettings: () =>
     request<{ settings: SystemSettings; runtime_mode: string; data_dir: string }>('/api/v1/system/settings'),

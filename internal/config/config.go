@@ -23,6 +23,11 @@ type Config struct {
 	DevMode       bool   // Enables verbose logs and CORS for Vite dev server
 	StaticDir     string // Optional external static dir override (empty => embedded)
 	CookieSecure  bool   // Set Secure flag on auth cookies (enable behind HTTPS)
+	DockerSock    string // Path to Docker Unix socket for self-upgrade (default: /var/run/docker.sock)
+	GitHubRepo    string // Optional GitHub repo override for version check (owner/repo)
+	DockerImage   string // Optional Docker image repo override (e.g. ghcr.io/owner/repo)
+	ShowVersion   bool   // Print version info and exit
+	UpgradeHelper bool   // Internal mode: run as temporary Docker self-upgrade helper
 }
 
 // Load parses configuration from environment variables and CLI flags.
@@ -36,6 +41,9 @@ func Load() *Config {
 		DevMode:      envBool("WALRUS_DEV", false),
 		StaticDir:    os.Getenv("WALRUS_STATIC_DIR"),
 		CookieSecure: envBool("WALRUS_COOKIE_SECURE", false),
+		DockerSock:   envOr("WALRUS_DOCKER_SOCK", "/var/run/docker.sock"),
+		GitHubRepo:   os.Getenv("WALRUS_GITHUB_REPO"),
+		DockerImage:  os.Getenv("WALRUS_DOCKER_IMAGE"),
 	}
 
 	flag.StringVar(&cfg.Addr, "addr", cfg.Addr, "HTTP listen address (env: WALRUS_ADDR)")
@@ -45,6 +53,9 @@ func Load() *Config {
 	flag.BoolVar(&cfg.DevMode, "dev", cfg.DevMode, "Enable dev mode with CORS (env: WALRUS_DEV)")
 	flag.StringVar(&cfg.StaticDir, "static-dir", cfg.StaticDir, "Serve frontend from directory instead of embedded assets")
 	flag.BoolVar(&cfg.CookieSecure, "cookie-secure", cfg.CookieSecure, "Set Secure flag on auth cookies")
+	flag.StringVar(&cfg.DockerSock, "docker-sock", cfg.DockerSock, "Docker Unix socket path for one-click upgrade (env: WALRUS_DOCKER_SOCK)")
+	flag.BoolVar(&cfg.ShowVersion, "version", false, "Print version information and exit")
+	flag.BoolVar(&cfg.UpgradeHelper, "self-upgrade-helper", false, "Internal: execute container replacement helper")
 	flag.Parse()
 
 	absData, err := filepath.Abs(cfg.DataDir)

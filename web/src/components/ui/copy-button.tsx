@@ -10,7 +10,7 @@ interface CopyButtonProps {
   className?: string
 }
 
-async function copyTextWithFallback(text: string): Promise<boolean> {
+export async function copyTextWithFallback(text: string): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
     try {
       await navigator.clipboard.writeText(text)
@@ -19,22 +19,23 @@ async function copyTextWithFallback(text: string): Promise<boolean> {
       // fall through to execCommand fallback (e.g. LAN HTTP NAS access)
     }
   }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.style.position = 'fixed'
+  ta.style.top = '-9999px'
+  ta.style.left = '-9999px'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
   try {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.setAttribute('readonly', '')
-    ta.style.position = 'fixed'
-    ta.style.top = '-9999px'
-    ta.style.left = '-9999px'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.focus()
+    ta.focus({ preventScroll: true })
     ta.select()
-    const ok = document.execCommand('copy')
-    document.body.removeChild(ta)
-    return ok
+    ta.setSelectionRange(0, ta.value.length)
+    return document.execCommand('copy')
   } catch {
     return false
+  } finally {
+    document.body.removeChild(ta)
   }
 }
 

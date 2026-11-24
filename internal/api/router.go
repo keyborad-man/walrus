@@ -16,6 +16,8 @@ import (
 	"walrus/internal/runtime"
 	"walrus/internal/service"
 	"walrus/internal/steam"
+	"walrus/internal/updater"
+	"walrus/internal/version"
 	"walrus/internal/ws"
 )
 
@@ -31,6 +33,7 @@ type Server struct {
 	cronSvc    *service.CronService
 	webhookSvc *service.WebhookService
 	steamMgr   *steam.Manager
+	updaterSvc *updater.Service
 	wsHandler  *ws.ConsoleHandler
 	steamWS    *ws.SteamHandler
 	staticFS   fs.FS
@@ -48,8 +51,12 @@ func NewServer(
 	cronSvc *service.CronService,
 	webhookSvc *service.WebhookService,
 	steamMgr *steam.Manager,
+	updaterSvc *updater.Service,
 	staticFS fs.FS,
 ) *Server {
+	if updaterSvc == nil {
+		updaterSvc = updater.NewService(cfg.GitHubRepo, cfg.DockerImage, cfg.DockerSock, driver.Mode())
+	}
 	return &Server{
 		cfg:        cfg,
 		store:      store,
@@ -62,6 +69,7 @@ func NewServer(
 		cronSvc:    cronSvc,
 		webhookSvc: webhookSvc,
 		steamMgr:   steamMgr,
+		updaterSvc: updaterSvc,
 		wsHandler:  ws.NewConsoleHandler(store, driver),
 		steamWS:    ws.NewSteamHandler(store, steamMgr),
 		staticFS:   staticFS,
@@ -80,7 +88,11 @@ func (s *Server) Engine() *gin.Engine {
 	}
 
 	r.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "runtime": s.driver.Mode()})
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"runtime": s.driver.Mode(),
+			"version": version.Current().Version,
+		})
 	})
 
 	v1 := r.Group("/api/v1")
@@ -97,6 +109,7 @@ func (s *Server) Engine() *gin.Engine {
 		{
 			authed.GET("/auth/me", s.handleMe)
 			authed.GET("/system/metrics", s.handleSystemMetrics)
+			authed.GET("/system/version", s.handleSystemVersion)
 			authed.GET("/presets", s.handleListPresets)
 			authed.GET("/steam/status", s.handleSteamStatus)
 
@@ -199,6 +212,8 @@ func (s *Server) Engine() *gin.Engine {
 				admin.DELETE("/users/:uid", s.handleDeleteUser)
 				admin.GET("/system/settings", s.handleGetSettings)
 				admin.PUT("/system/settings", s.handleUpdateSettings)
+				admin.POST("/system/version/check", s.handleCheckSystemVersion)
+				admin.POST("/system/upgrade", s.handleSystemUpgrade)
 				admin.GET("/audit-logs", s.handleListAuditLogs)
 			}
 		}
