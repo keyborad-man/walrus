@@ -77,17 +77,24 @@ type AuditLog struct {
 }
 
 type SystemSettings struct {
-	PortPoolStart       int    `json:"port_pool_start"`
-	PortPoolEnd         int    `json:"port_pool_end"`
-	DefaultClusterToken string `json:"default_cluster_token"`
-	HasDefaultToken     bool   `json:"has_default_token"`
+	PortPoolStart         int    `json:"port_pool_start"`
+	PortPoolEnd           int    `json:"port_pool_end"`
+	DefaultClusterToken   string `json:"default_cluster_token"`
+	HasDefaultToken       bool   `json:"has_default_token"`
 	SteamAPIKey           string `json:"steam_api_key"`
 	HasSteamAPIKey        bool   `json:"has_steam_api_key"`
 	HasDefaultSteamAPIKey bool   `json:"has_default_steam_api_key"`
-	DSTBranch           string `json:"dst_branch"`       // public | updatebeta
-	DSTArch             string `json:"dst_arch"`         // 64 | 32
-	AutoUpdateMode      string `json:"auto_update_mode"` // manual | when_empty | scheduled
-	BackupMaxRetain     int    `json:"backup_max_retain"`
+	ProxyEnabled          bool   `json:"proxy_enabled"`
+	ProxyEnabledSet       bool   `json:"-"`
+	ProxyURL              string `json:"proxy_url"`
+	HasProxyURL           bool   `json:"has_proxy_url"`
+	HasProxyAuth          bool   `json:"has_proxy_auth"`
+	HasDefaultProxyURL    bool   `json:"has_default_proxy_url"`
+	DefaultProxyURL       string `json:"default_proxy_url,omitempty"`
+	DSTBranch             string `json:"dst_branch"`       // public | updatebeta
+	DSTArch               string `json:"dst_arch"`         // 64 | 32
+	AutoUpdateMode        string `json:"auto_update_mode"` // manual | when_empty | scheduled
+	BackupMaxRetain       int    `json:"backup_max_retain"`
 }
 
 type ModCache struct {

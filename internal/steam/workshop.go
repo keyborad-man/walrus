@@ -70,6 +70,28 @@ func (c *WorkshopClient) getDefaultAPIKey() string {
 	return k
 }
 
+// SetProxy updates the outbound network proxy used for all Steam Workshop HTTP requests.
+// Pass an empty string to restore direct/environment-default connections.
+func (c *WorkshopClient) SetProxy(proxyURL string) error {
+	client, err := NewHTTPClient(proxyURL, 12*time.Second)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.httpClient = client
+	// Reset curated retry cooldown so newly enabled proxy takes effect immediately.
+	c.curatedRetryAfter = time.Time{}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *WorkshopClient) getHTTPClient() *http.Client {
+	c.mu.Lock()
+	cl := c.httpClient
+	c.mu.Unlock()
+	return cl
+}
+
 var (
 	workshopURLIDRe = regexp.MustCompile(`[?&]id=(\d+)`)
 	workshopPrefRe  = regexp.MustCompile(`^workshop-(\d+)$`)
@@ -117,7 +139,7 @@ func (c *WorkshopClient) GetPublishedFileDetails(ctx context.Context, ids []stri
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.getHTTPClient().Do(req)
 	if err != nil {
 		if c.runtimeMode == "mock" {
 			return mockFallbackDetails(ids), nil
@@ -198,7 +220,7 @@ func (c *WorkshopClient) GetCollectionItems(ctx context.Context, input string) (
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.getHTTPClient().Do(req)
 	if err != nil {
 		if c.runtimeMode == "mock" {
 			return []string{"378160973", "1207269058", "375850599"}, nil
@@ -292,7 +314,7 @@ func (c *WorkshopClient) SearchWorkshop(ctx context.Context, apiKey, query strin
 	if err != nil {
 		return nil, 0, false, err
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.getHTTPClient().Do(req)
 	if err != nil {
 		if usingDefaultKey {
 			catalog := c.getCuratedCatalog(ctx)

@@ -66,6 +66,7 @@ type Manager struct {
 	httpClient   *http.Client
 
 	mu            sync.RWMutex
+	proxyURL      string
 	taskState     TaskState
 	taskKind      string
 	lastError     string
@@ -89,6 +90,41 @@ func NewManager(steamCMDDir, dstServerDir, runtimeMode string) *Manager {
 		logs:         make([]LogLine, 0, 400),
 		subs:         make(map[uint64]chan LogLine),
 	}
+}
+
+// SetProxy updates the outbound network proxy used for Klei version checks and SteamCMD downloads.
+// Pass an empty string to disable the panel-managed proxy.
+func (m *Manager) SetProxy(proxyURL string) error {
+	trimmed := strings.TrimSpace(proxyURL)
+	client, err := NewHTTPClient(trimmed, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.httpClient = client
+	m.proxyURL = trimmed
+	m.mu.Unlock()
+	return nil
+}
+
+// ProxyURL returns the currently configured proxy URL (empty if disabled).
+func (m *Manager) ProxyURL() string {
+	m.mu.RLock()
+	p := m.proxyURL
+	m.mu.RUnlock()
+	return p
+}
+
+// ProxyChainsReady reports whether proxychains4 is available for tunneling SteamCMD.
+func (m *Manager) ProxyChainsReady() bool {
+	return ProxyChainsAvailable()
+}
+
+func (m *Manager) getHTTPClient() *http.Client {
+	m.mu.RLock()
+	cl := m.httpClient
+	m.mu.RUnlock()
+	return cl
 }
 
 func (m *Manager) publish(msg string) {
@@ -239,7 +275,7 @@ func (m *Manager) CheckRemoteVersion(ctx context.Context, branch string) (Status
 	if err != nil {
 		return m.Status(branch), err
 	}
-	resp, err := m.httpClient.Do(req)
+	resp, err := m.getHTTPClient().Do(req)
 	if err != nil {
 		if m.runtimeMode == "mock" {
 			now := time.Now().UTC()
@@ -396,6 +432,9 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 	}
 
 	if m.runtimeMode == "mock" {
+		if p := m.ProxyURL(); p != "" {
+			m.publish(fmt.Sprintf("[walrus] [Mock SteamCMD] Using network proxy: %s", MaskProxyURL(p)))
+		}
 		m.publish(fmt.Sprintf("[walrus] [Mock SteamCMD] Downloading Workshop item %s...", workshopID))
 		if err := os.MkdirAll(destDir, 0o755); err != nil {
 			return "", err
@@ -466,9 +505,13 @@ func (m *Manager) execSteamCMD(args []string) (bool, error) {
 		return false, err
 	}
 
-	cmd := exec.Command(m.SteamCMDPath(), args...)
-	cmd.Dir = m.steamCMDDir
-	cmd.Env = setEnv(os.Environ(), "HOME", homeDir)
+	cmd, cleanup, err := m.prepareSteamCMDCommand(args, homeDir, m.ProxyURL())
+	if err != nil {
+		return false, err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -505,6 +548,97 @@ func (m *Manager) execSteamCMD(args []string) (bool, error) {
 	go pipe(stderr)
 	wg.Wait()
 	return missingConfig.Load(), cmd.Wait()
+}
+
+func (m *Manager) prepareSteamCMDCommand(args []string, homeDir, proxyURL string) (*exec.Cmd, func(), error) {
+	env := setEnv(os.Environ(), "HOME", homeDir)
+	proxyURL = strings.TrimSpace(proxyURL)
+
+	if proxyURL == "" {
+		cmd := exec.Command(m.SteamCMDPath(), args...)
+		cmd.Dir = m.steamCMDDir
+		cmd.Env = env
+		return cmd, nil, nil
+	}
+
+	m.publish(fmt.Sprintf("[walrus] Using network proxy: %s", MaskProxyURL(proxyURL)))
+	env = applyProxyEnv(env, proxyURL)
+
+	u, err := ParseProxyURL(proxyURL)
+	if err != nil || u == nil {
+		cmd := exec.Command(m.SteamCMDPath(), args...)
+		cmd.Dir = m.steamCMDDir
+		cmd.Env = env
+		return cmd, nil, nil
+	}
+
+	confBody, confErr := BuildProxyChainsConf(u, nil)
+	if confErr != nil {
+		if errors.Is(confErr, ErrProxyChainsUnsupportedScheme) {
+			m.publish("[walrus] Notice: proxychains4 does not support https:// proxy scheme; SteamCMD will only receive proxy environment variables (use http:// or socks5:// for full SteamCMD tunneling).")
+		} else {
+			m.publish(fmt.Sprintf("[walrus] Warning: failed to build proxychains4 config (%v); falling back to proxy environment variables.", confErr))
+		}
+		cmd := exec.Command(m.SteamCMDPath(), args...)
+		cmd.Dir = m.steamCMDDir
+		cmd.Env = env
+		return cmd, nil, nil
+	}
+
+	multiarchLib := multiarchProxyChainsLib()
+	pcBin := ""
+	if multiarchLib == "" {
+		pcBin = findProxyChainsBinary()
+	}
+	if multiarchLib == "" && pcBin == "" {
+		m.publish("[walrus] Notice: proxychains4 not found on host; SteamCMD may ignore HTTP_PROXY environment variables (install proxychains4 or use the official Docker image).")
+		cmd := exec.Command(m.SteamCMDPath(), args...)
+		cmd.Dir = m.steamCMDDir
+		cmd.Env = env
+		return cmd, nil, nil
+	}
+
+	_ = os.MkdirAll(m.steamCMDDir, 0o755)
+	tmpFile, err := os.CreateTemp(m.steamCMDDir, ".proxychains-*.conf")
+	if err != nil {
+		return nil, nil, fmt.Errorf("create temp proxychains config: %w", err)
+	}
+	confPath := tmpFile.Name()
+	cleanup := func() { _ = os.Remove(confPath) }
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		cleanup()
+		return nil, nil, err
+	}
+	if _, err := tmpFile.WriteString(confBody); err != nil {
+		_ = tmpFile.Close()
+		cleanup()
+		return nil, nil, err
+	}
+	if err := tmpFile.Close(); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+
+	if multiarchLib != "" {
+		env = setEnv(env, "PROXYCHAINS_CONF_FILE", confPath)
+		env = setEnv(env, "PROXYCHAINS_QUIET_MODE", "1")
+		preload := multiarchLib
+		if existing := strings.TrimSpace(os.Getenv("LD_PRELOAD")); existing != "" {
+			preload = multiarchLib + " " + existing
+		}
+		env = setEnv(env, "LD_PRELOAD", preload)
+		cmd := exec.Command(m.SteamCMDPath(), args...)
+		cmd.Dir = m.steamCMDDir
+		cmd.Env = env
+		return cmd, cleanup, nil
+	}
+
+	pcArgs := append([]string{"-q", "-f", confPath, m.SteamCMDPath()}, args...)
+	cmd := exec.Command(pcBin, pcArgs...)
+	cmd.Dir = m.steamCMDDir
+	cmd.Env = env
+	return cmd, cleanup, nil
 }
 
 func stripANSI(s string) string {

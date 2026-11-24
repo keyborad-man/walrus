@@ -20,6 +20,7 @@ type Config struct {
 	RuntimeMode   string // "auto", "linux", or "mock"
 	JWTSecret     string // Optional override for JWT signing secret
 	SteamAPIKey   string // Optional default Steam Web API Key (overridden by System Settings)
+	ProxyURL      string // Optional default outbound proxy URL for Mod/Steam (overridden by System Settings)
 	DevMode       bool   // Enables verbose logs and CORS for Vite dev server
 	StaticDir     string // Optional external static dir override (empty => embedded)
 	CookieSecure  bool   // Set Secure flag on auth cookies (enable behind HTTPS)
@@ -38,6 +39,7 @@ func Load() *Config {
 		RuntimeMode:  strings.ToLower(envOr("WALRUS_RUNTIME", "auto")),
 		JWTSecret:    os.Getenv("WALRUS_JWT_SECRET"),
 		SteamAPIKey:  envOr("WALRUS_STEAM_API_KEY", strings.TrimSpace(DefaultSteamAPIKey)),
+		ProxyURL:     strings.TrimSpace(os.Getenv("WALRUS_PROXY_URL")),
 		DevMode:      envBool("WALRUS_DEV", false),
 		StaticDir:    os.Getenv("WALRUS_STATIC_DIR"),
 		CookieSecure: envBool("WALRUS_COOKIE_SECURE", false),
@@ -50,6 +52,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "Persistent data root directory (env: WALRUS_DATA_DIR)")
 	flag.StringVar(&cfg.RuntimeMode, "runtime", cfg.RuntimeMode, "Runtime driver: auto, linux, mock (env: WALRUS_RUNTIME)")
 	flag.StringVar(&cfg.SteamAPIKey, "steam-api-key", cfg.SteamAPIKey, "Default Steam Web API Key for Workshop search (env: WALRUS_STEAM_API_KEY)")
+	flag.StringVar(&cfg.ProxyURL, "proxy-url", cfg.ProxyURL, "Default network proxy URL for Mod queries & SteamCMD downloads (env: WALRUS_PROXY_URL)")
 	flag.BoolVar(&cfg.DevMode, "dev", cfg.DevMode, "Enable dev mode with CORS (env: WALRUS_DEV)")
 	flag.StringVar(&cfg.StaticDir, "static-dir", cfg.StaticDir, "Serve frontend from directory instead of embedded assets")
 	flag.BoolVar(&cfg.CookieSecure, "cookie-secure", cfg.CookieSecure, "Set Secure flag on auth cookies")

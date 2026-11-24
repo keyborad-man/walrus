@@ -184,10 +184,26 @@ export interface SystemSettings {
   steam_api_key: string
   has_steam_api_key: boolean
   has_default_steam_api_key?: boolean
+  proxy_enabled: boolean
+  proxy_url: string
+  has_proxy_url: boolean
+  has_proxy_auth: boolean
+  has_default_proxy_url?: boolean
+  default_proxy_url?: string
   dst_branch: string
   dst_arch: string
   auto_update_mode: string
   backup_max_retain: number
+}
+
+export interface ProxyTestResult {
+  ok: boolean
+  latency_ms: number
+  status_code: number
+  target: string
+  proxy_url: string
+  proxychains_ready: boolean
+  proxychains_note?: string
 }
 
 export interface DockerCapability {

@@ -625,6 +625,11 @@ func (s *ModService) SearchWorkshop(ctx context.Context, query string, page int)
 	return s.workshop.SearchWorkshop(ctx, apiKey, query, page)
 }
 
+// SetProxy updates the outbound network proxy used by the Workshop client.
+func (s *ModService) SetProxy(proxyURL string) error {
+	return s.workshop.SetProxy(proxyURL)
+}
+
 func copyDirSimple(src, dstDir string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

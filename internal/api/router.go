@@ -212,6 +212,7 @@ func (s *Server) Engine() *gin.Engine {
 				admin.DELETE("/users/:uid", s.handleDeleteUser)
 				admin.GET("/system/settings", s.handleGetSettings)
 				admin.PUT("/system/settings", s.handleUpdateSettings)
+				admin.POST("/system/proxy/test", s.handleTestProxy)
 				admin.POST("/system/version/check", s.handleCheckSystemVersion)
 				admin.POST("/system/upgrade", s.handleSystemUpgrade)
 				admin.GET("/audit-logs", s.handleListAuditLogs)

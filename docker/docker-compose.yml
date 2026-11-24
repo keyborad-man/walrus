@@ -20,6 +20,8 @@ services:
       WALRUS_RUNTIME: "linux"
       # 可选：默认 Steam Web API Key（可在面板「系统设置」中随时覆盖）
       # WALRUS_STEAM_API_KEY: ""
+      # 可选：默认网络代理（用于 Mod 查询、Mod 下载、DST 服务端更新与版本检测；可在「系统设置」随时开关或覆盖）
+      # WALRUS_PROXY_URL: "http://127.0.0.1:7890"
       TZ: "Asia/Shanghai"
     volumes:
       - ./data:/data

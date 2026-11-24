@@ -82,6 +82,17 @@ func main() {
 	workshopClient := steam.NewWorkshopClient(driver.Mode())
 	workshopClient.SetDefaultAPIKey(cfg.SteamAPIKey)
 
+	if st, err := store.GetSystemSettings(true); err == nil {
+		if _, effectiveProxy := api.ResolveEffectiveProxy(st, cfg.ProxyURL); effectiveProxy != "" {
+			if err := steamMgr.SetProxy(effectiveProxy); err != nil {
+				slog.Warn("failed to apply network proxy to steam manager", "err", err)
+			}
+			if err := workshopClient.SetProxy(effectiveProxy); err != nil {
+				slog.Warn("failed to apply network proxy to workshop client", "err", err)
+			}
+		}
+	}
+
 	authSvc := auth.NewService(store, jwtSecret, cfg.CookieSecure)
 	webhookSvc := service.NewWebhookService(store)
 	driver.SetEventHook(func(event, title, message, clusterID string) {

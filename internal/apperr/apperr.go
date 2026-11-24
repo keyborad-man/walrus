@@ -36,6 +36,8 @@ const (
 
 	// System settings & Self-upgrade
 	CodeInvalidPortPoolRange     = "INVALID_PORT_POOL_RANGE"
+	CodeInvalidProxyURL          = "INVALID_PROXY_URL"
+	CodeProxyTestFailed          = "PROXY_TEST_FAILED"
 	CodeVersionCheckFailed       = "VERSION_CHECK_FAILED"
 	CodeUpgradeUnavailable       = "UPGRADE_UNAVAILABLE"
 	CodeUpgradeInProgress        = "UPGRADE_IN_PROGRESS"

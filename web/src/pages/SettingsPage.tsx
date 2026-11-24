@@ -8,10 +8,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ExternalLink,
+  Globe,
   HelpCircle,
   KeyRound,
   Loader2,
   Network,
+  PlugZap,
   RefreshCw,
   Save,
   ServerCog,
@@ -23,6 +25,7 @@ import { useRegisterUnsaved } from '@/hooks/useUnsavedGuard'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input, Label, SecretInput, Select } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import { CopyButton } from '@/components/ui/copy-button'
 import { CollapsibleContent } from '@/components/ui/collapsible'
@@ -33,6 +36,22 @@ import { PageHeader } from '@/components/PageHeader'
 import { PageCardsSkeleton } from '@/components/ui/skeleton'
 
 const MANUAL_UPGRADE_CMD = 'docker compose pull && docker compose up -d'
+const ALLOWED_PROXY_SCHEMES = new Set(['http:', 'https:', 'socks5:', 'socks5h:'])
+
+function isValidProxyUrl(raw: string): boolean {
+  const s = raw.trim()
+  if (!s) return true
+  if (/\s/.test(s)) return false
+  try {
+    const u = new URL(s)
+    if (!ALLOWED_PROXY_SCHEMES.has(u.protocol.toLowerCase())) return false
+    if (!u.hostname || !u.port) return false
+    const port = Number(u.port)
+    return Number.isInteger(port) && port >= 1 && port <= 65535
+  } catch {
+    return false
+  }
+}
 
 export function SettingsPage() {
   const { t } = useTranslation()
@@ -57,6 +76,14 @@ export function SettingsPage() {
   const [defaultToken, setDefaultToken] = useState('')
   const [steamKey, setSteamKey] = useState('')
   const [clearSteamKey, setClearSteamKey] = useState(false)
+  const [proxyEnabled, setProxyEnabled] = useState(false)
+  const [proxyUrl, setProxyUrl] = useState('')
+  const [clearProxyUrl, setClearProxyUrl] = useState(false)
+  const [proxyTestFeedback, setProxyTestFeedback] = useState<
+    | { ok: true; latencyMs: number; target: string; httpsWarn: boolean }
+    | { ok: false; message: string }
+    | null
+  >(null)
   const [branch, setBranch] = useState('public')
   const [arch, setArch] = useState('64')
   const [autoUpdate, setAutoUpdate] = useState('manual')
@@ -206,6 +233,10 @@ export function SettingsPage() {
     setDefaultToken('')
     setSteamKey('')
     setClearSteamKey(false)
+    setProxyEnabled(Boolean(data.settings.proxy_enabled))
+    setProxyUrl(data.settings.has_proxy_auth ? '' : data.settings.proxy_url || '')
+    setClearProxyUrl(false)
+    setProxyTestFeedback(null)
   }
 
   useEffect(() => {
@@ -216,6 +247,9 @@ export function SettingsPage() {
   const isDirty = useMemo(() => {
     if (!data?.settings) return false
     const s = data.settings
+    const proxyUrlChanged = s.has_proxy_auth
+      ? proxyUrl.trim().length > 0 || clearProxyUrl
+      : proxyUrl.trim() !== (s.proxy_url || '')
     return (
       Number(portStart) !== s.port_pool_start ||
       Number(portEnd) !== s.port_pool_end ||
@@ -225,9 +259,25 @@ export function SettingsPage() {
       Number(backupRetain) !== s.backup_max_retain ||
       defaultToken.trim().length > 0 ||
       steamKey.trim().length > 0 ||
-      clearSteamKey
+      clearSteamKey ||
+      proxyEnabled !== Boolean(s.proxy_enabled) ||
+      proxyUrlChanged
     )
-  }, [data, portStart, portEnd, branch, arch, autoUpdate, backupRetain, defaultToken, steamKey, clearSteamKey])
+  }, [
+    data,
+    portStart,
+    portEnd,
+    branch,
+    arch,
+    autoUpdate,
+    backupRetain,
+    defaultToken,
+    steamKey,
+    clearSteamKey,
+    proxyEnabled,
+    proxyUrl,
+    clearProxyUrl,
+  ])
 
   const startNum = Number(portStart)
   const endNum = Number(portEnd)
@@ -238,6 +288,30 @@ export function SettingsPage() {
     endNum <= 65535 &&
     endNum - startNum >= 6
   const portPoolCapacity = portPoolValid ? Math.floor((endNum - startNum + 1) / 7) : 0
+
+  const proxySettings = data?.settings
+  const proxySyntaxValid = isValidProxyUrl(proxyUrl)
+  const hasEffectiveProxySource =
+    proxyUrl.trim().length > 0 ||
+    Boolean(proxySettings?.has_proxy_auth && !clearProxyUrl) ||
+    Boolean(proxySettings?.has_default_proxy_url)
+  const proxyMissingUrl = proxyEnabled && !hasEffectiveProxySource
+  const proxyValid = proxySyntaxValid && !proxyMissingUrl
+  const formValid = portPoolValid && proxyValid
+
+  const testProxyMut = useMutation({
+    mutationFn: () => api.testProxy(proxyUrl.trim() || undefined),
+    onSuccess: (res) => {
+      const r = res.result
+      const httpsWarn = r.proxychains_note === 'https_scheme_unsupported_by_proxychains'
+      setProxyTestFeedback({ ok: true, latencyMs: r.latency_ms, target: r.target, httpsWarn })
+      toast.success(t('settings.proxyTestSuccess', { target: r.target, latency: r.latency_ms }))
+    },
+    onError: (err: Error) => {
+      setProxyTestFeedback({ ok: false, message: err.message })
+      toast.error(err.message)
+    },
+  })
 
   useRegisterUnsaved('system-settings', isDirty)
 
@@ -250,10 +324,17 @@ export function SettingsPage() {
         dst_arch: arch,
         auto_update_mode: autoUpdate,
         backup_max_retain: Number(backupRetain),
+        proxy_enabled: proxyEnabled,
       }
       if (defaultToken.trim()) payload.default_cluster_token = defaultToken.trim()
       if (steamKey.trim()) payload.steam_api_key = steamKey.trim()
       else if (clearSteamKey) payload.steam_api_key = ''
+      if (data?.settings.has_proxy_auth) {
+        if (proxyUrl.trim()) payload.proxy_url = proxyUrl.trim()
+        else if (clearProxyUrl) payload.proxy_url = ''
+      } else if (proxyUrl.trim() !== (data?.settings.proxy_url || '')) {
+        payload.proxy_url = proxyUrl.trim()
+      }
       return api.updateSettings(payload)
     },
     onSuccess: () => {
@@ -261,6 +342,7 @@ export function SettingsPage() {
       setDefaultToken('')
       setSteamKey('')
       setClearSteamKey(false)
+      setClearProxyUrl(false)
       void qc.invalidateQueries({ queryKey: ['system-settings'] })
       void qc.invalidateQueries({ queryKey: ['workshop-search'] })
     },
@@ -270,14 +352,14 @@ export function SettingsPage() {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-        if (!isDirty || !portPoolValid || saveMut.isPending) return
+        if (!isDirty || !formValid || saveMut.isPending) return
         e.preventDefault()
         saveMut.mutate()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isDirty, portPoolValid, saveMut])
+  }, [isDirty, formValid, saveMut])
 
   if (isError) {
     return <QueryErrorCard error={error} onRetry={() => void refetch()} />
@@ -289,7 +371,7 @@ export function SettingsPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!portPoolValid) return
+    if (!formValid) return
     saveMut.mutate()
   }
 
@@ -693,6 +775,165 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
+      {/* Network Proxy */}
+      <Card id="proxy">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 flex-wrap">
+            <Globe className="h-4 w-4 text-primary shrink-0" />
+            <span>{t('settings.proxySection')}</span>
+            <Badge variant={proxyEnabled ? 'success' : 'secondary'}>
+              {proxyEnabled ? t('settings.proxyEnabledBadge') : t('settings.proxyDisabledBadge')}
+            </Badge>
+            {data.settings.has_default_proxy_url && !data.settings.has_proxy_url && !proxyUrl.trim() && (
+              <Badge variant="info">{t('settings.proxyUsingDefaultBadge')}</Badge>
+            )}
+          </CardTitle>
+          <CardDescription>{t('settings.proxySectionHint')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-secondary/25 px-3.5 py-2.5">
+            <Label htmlFor="set-proxy-enabled" className="cursor-pointer font-medium">
+              {t('settings.proxyEnabled')}
+            </Label>
+            <Switch
+              id="set-proxy-enabled"
+              checked={proxyEnabled}
+              onCheckedChange={(checked) => {
+                setProxyEnabled(checked)
+                setProxyTestFeedback(null)
+              }}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <Label htmlFor="set-proxy-url">{t('settings.proxyUrlLabel')}</Label>
+              {data.settings.has_proxy_auth && !clearProxyUrl ? (
+                <div className="flex items-center gap-2">
+                  <Badge variant="success" className="font-mono">
+                    {data.settings.proxy_url}
+                  </Badge>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setClearProxyUrl(true)
+                      setProxyUrl('')
+                      setProxyTestFeedback(null)
+                    }}
+                    className="text-xs font-medium text-muted-foreground hover:text-foreground underline underline-offset-4 cursor-pointer"
+                  >
+                    {data.settings.has_default_proxy_url
+                      ? t('settings.proxyClearToDefault')
+                      : t('settings.proxyClear')}
+                  </button>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                id="set-proxy-url"
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={!proxyValid}
+                className={cn(
+                  'font-mono text-xs sm:flex-1',
+                  !proxyValid && 'border-red-600 focus-visible:ring-red-600',
+                )}
+                placeholder={
+                  data.settings.has_proxy_auth && !clearProxyUrl
+                    ? t('settings.proxyUrlPlaceholderAuthSaved')
+                    : data.settings.has_default_proxy_url
+                      ? t('settings.proxyUrlPlaceholderUsingDefault', {
+                          url: data.settings.default_proxy_url || 'WALRUS_PROXY_URL',
+                        })
+                      : t('settings.proxyUrlPlaceholder')
+                }
+                value={proxyUrl}
+                onChange={(e) => {
+                  setProxyUrl(e.target.value)
+                  if (e.target.value.trim()) setClearProxyUrl(false)
+                  setProxyTestFeedback(null)
+                }}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 sm:h-9"
+                disabled={testProxyMut.isPending || !proxySyntaxValid || !hasEffectiveProxySource}
+                onClick={() => testProxyMut.mutate()}
+              >
+                {testProxyMut.isPending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <PlugZap className="h-3.5 w-3.5" />
+                )}
+                {testProxyMut.isPending ? t('settings.proxyTesting') : t('settings.proxyTestBtn')}
+              </Button>
+            </div>
+
+            {!proxySyntaxValid ? (
+              <p role="alert" className="text-xs font-medium text-red-700 dark:text-red-400">
+                {t('settings.proxyUrlInvalid')}
+              </p>
+            ) : proxyMissingUrl ? (
+              <p role="alert" className="text-xs font-medium text-red-700 dark:text-red-400">
+                {t('settings.proxyUrlRequired')}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground leading-relaxed">{t('settings.proxyUrlHint')}</p>
+            )}
+
+            {proxyUrl.trim().toLowerCase().startsWith('https://') && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:border-amber-500/35 dark:text-amber-200">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
+                <span>{t('settings.proxyTestHttpsWarn')}</span>
+              </div>
+            )}
+
+            {proxyTestFeedback && (
+              <div
+                role={proxyTestFeedback.ok ? 'status' : 'alert'}
+                className={cn(
+                  'flex items-start gap-2 rounded-lg border px-3 py-2 text-xs',
+                  proxyTestFeedback.ok
+                    ? 'border-emerald-600/30 bg-emerald-500/10 text-emerald-950 dark:border-emerald-500/35 dark:text-emerald-200'
+                    : 'border-red-600/30 bg-red-600/10 text-red-900 dark:border-red-500/35 dark:text-red-200',
+                )}
+              >
+                {proxyTestFeedback.ok ? (
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0 mt-0.5 text-emerald-700 dark:text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-red-700 dark:text-red-400" />
+                )}
+                <div className="space-y-0.5">
+                  <div>
+                    {proxyTestFeedback.ok
+                      ? t('settings.proxyTestSuccess', {
+                          target: proxyTestFeedback.target,
+                          latency: proxyTestFeedback.latencyMs,
+                        })
+                      : proxyTestFeedback.message}
+                  </div>
+                  {proxyTestFeedback.ok && proxyTestFeedback.httpsWarn && (
+                    <div className="text-amber-800 dark:text-amber-300">{t('settings.proxyTestHttpsWarn')}</div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {proxyEnabled && data.runtime_mode === 'linux' && !data.proxychains_ready && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:border-amber-500/35 dark:text-amber-200">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
+                <span>{t('settings.proxyChainsMissingWarn')}</span>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* DST Server Params */}
       <Card>
         <CardHeader>
@@ -745,7 +986,7 @@ export function SettingsPage() {
             {t('common.discard')}
           </Button>
         )}
-        <Button type="submit" disabled={saveMut.isPending || !isDirty || !portPoolValid}>
+        <Button type="submit" disabled={saveMut.isPending || !isDirty || !formValid}>
           <Save className="h-4 w-4" />
           {saveMut.isPending ? t('common.saving') : t('common.save')}
         </Button>
@@ -754,10 +995,10 @@ export function SettingsPage() {
       <StickySaveBar
         visible={isDirty}
         saving={saveMut.isPending}
-        disabled={!portPoolValid}
+        disabled={!formValid}
         onDiscard={resetFromData}
         onSave={() => {
-          if (portPoolValid) saveMut.mutate()
+          if (formValid) saveMut.mutate()
         }}
       />
 

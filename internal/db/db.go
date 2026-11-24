@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -182,6 +183,8 @@ func (s *Store) migrate() error {
 		"port_pool_end":         "11060",
 		"default_cluster_token": "",
 		"steam_api_key":         "",
+		"proxy_enabled":         "",
+		"proxy_url":             "",
 		"dst_branch":            "public",
 		"dst_arch":              "64",
 		"auto_update_mode":      "manual",
@@ -255,11 +258,21 @@ func (s *Store) GetSystemSettings(includeSecrets bool) (*SystemSettings, error) 
 
 	rawToken := kv["default_cluster_token"]
 	rawSteam := kv["steam_api_key"]
+	rawProxyURL := strings.TrimSpace(kv["proxy_url"])
+	rawProxyEnabled := strings.ToLower(strings.TrimSpace(kv["proxy_enabled"]))
+	proxyEnabledSet := rawProxyEnabled == "true" || rawProxyEnabled == "false" || rawProxyEnabled == "1" || rawProxyEnabled == "0"
+	proxyEnabled := rawProxyEnabled == "true" || rawProxyEnabled == "1"
+	maskedProxy, hasProxyAuth := MaskProxyURL(rawProxyURL)
+
 	st := &SystemSettings{
 		PortPoolStart:   parseInt("port_pool_start", 10990),
 		PortPoolEnd:     parseInt("port_pool_end", 11060),
 		HasDefaultToken: rawToken != "",
 		HasSteamAPIKey:  rawSteam != "",
+		ProxyEnabled:    proxyEnabled,
+		ProxyEnabledSet: proxyEnabledSet,
+		HasProxyURL:     rawProxyURL != "",
+		HasProxyAuth:    hasProxyAuth,
 		DSTBranch:       nonEmpty(kv["dst_branch"], "public"),
 		DSTArch:         nonEmpty(kv["dst_arch"], "64"),
 		AutoUpdateMode:  nonEmpty(kv["auto_update_mode"], "manual"),
@@ -268,11 +281,33 @@ func (s *Store) GetSystemSettings(includeSecrets bool) (*SystemSettings, error) 
 	if includeSecrets {
 		st.DefaultClusterToken = rawToken
 		st.SteamAPIKey = rawSteam
+		st.ProxyURL = rawProxyURL
 	} else {
 		st.DefaultClusterToken = MaskSecret(rawToken)
 		st.SteamAPIKey = MaskSecret(rawSteam)
+		st.ProxyURL = maskedProxy
 	}
 	return st, nil
+}
+
+// MaskProxyURL hides any password in a proxy URL while keeping scheme, username, host, and port visible.
+func MaskProxyURL(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.User == nil {
+		return s, false
+	}
+	if _, hasPass := u.User.Password(); !hasPass {
+		return s, false
+	}
+	user := u.User.Username()
+	cloned := *u
+	cloned.User = nil
+	rest := strings.TrimPrefix(cloned.String(), cloned.Scheme+"://")
+	return fmt.Sprintf("%s://%s:********@%s", cloned.Scheme, user, rest), true
 }
 
 func MaskSecret(s string) string {

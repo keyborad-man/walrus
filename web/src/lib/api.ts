@@ -13,6 +13,7 @@ import type {
   ModCache,
   PlayerLists,
   PortSet,
+  ProxyTestResult,
   Role,
   ScheduledTask,
   ServerINI,
@@ -114,11 +115,18 @@ export const api = {
     }),
   presets: () => request<{ presets: WorldPreset[] }>('/api/v1/presets'),
   getSettings: () =>
-    request<{ settings: SystemSettings; runtime_mode: string; data_dir: string }>('/api/v1/system/settings'),
+    request<{ settings: SystemSettings; runtime_mode: string; data_dir: string; proxychains_ready: boolean }>(
+      '/api/v1/system/settings',
+    ),
   updateSettings: (body: Partial<SystemSettings>) =>
-    request<{ settings: SystemSettings }>('/api/v1/system/settings', {
+    request<{ settings: SystemSettings; proxychains_ready?: boolean }>('/api/v1/system/settings', {
       method: 'PUT',
       body: JSON.stringify(body),
+    }),
+  testProxy: (proxy_url?: string) =>
+    request<{ result: ProxyTestResult }>('/api/v1/system/proxy/test', {
+      method: 'POST',
+      body: JSON.stringify(proxy_url ? { proxy_url } : {}),
     }),
   auditLogs: (limit = 100, action = '') =>
     request<{ logs: AuditLog[] }>(`/api/v1/audit-logs?limit=${limit}&action=${encodeURIComponent(action)}`),

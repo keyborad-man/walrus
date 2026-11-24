@@ -520,3 +520,82 @@ func TestStructuredErrorCodesAndConsoleWS(t *testing.T) {
 		t.Fatal("did not receive command_ack for cmd-2")
 	}
 }
+
+func TestNetworkProxySettingsAndTestEndpoint(t *testing.T) {
+	h, cleanup := setupTestEngine(t)
+	defer cleanup()
+
+	// Setup admin
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/auth/setup", "", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("setup failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var setupResp struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &setupResp)
+	adminTok := setupResp.Token
+
+	// 1. Enabling proxy without URL must fail with INVALID_PROXY_URL
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/system/settings", adminTok, map[string]any{
+		"proxy_enabled": true,
+	})
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeInvalidProxyURL)) {
+		t.Fatalf("expected 400 INVALID_PROXY_URL when enabling without URL, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Invalid proxy URL scheme must fail with INVALID_PROXY_URL
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/system/settings", adminTok, map[string]any{
+		"proxy_enabled": true,
+		"proxy_url":     "ftp://127.0.0.1:21",
+	})
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeInvalidProxyURL)) {
+		t.Fatalf("expected 400 INVALID_PROXY_URL for bad scheme, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. Save authenticated proxy -> GET masks password and never leaks raw secret
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/system/settings", adminTok, map[string]any{
+		"proxy_enabled": true,
+		"proxy_url":     "http://alice:TopSecret99@127.0.0.1:7890",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save proxy settings failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("TopSecret99")) {
+		t.Fatal("raw proxy password leaked in PUT settings response!")
+	}
+
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/system/settings", adminTok, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get settings failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("TopSecret99")) {
+		t.Fatal("raw proxy password leaked in GET settings response!")
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"proxy_enabled":true`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"has_proxy_auth":true`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`http://alice:********@127.0.0.1:7890`)) {
+		t.Fatalf("unexpected masked proxy settings payload: %s", rec.Body.String())
+	}
+
+	// 4. Test proxy endpoint rejects invalid URL with 400
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/system/proxy/test", adminTok, map[string]any{
+		"proxy_url": "not-a-proxy",
+	})
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeInvalidProxyURL)) {
+		t.Fatalf("expected 400 INVALID_PROXY_URL on proxy test, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. Explicit disable overrides default env proxy
+	st := &db.SystemSettings{ProxyEnabled: false, ProxyEnabledSet: true}
+	if enabled, url := ResolveEffectiveProxy(st, "http://127.0.0.1:7890"); enabled || url != "" {
+		t.Fatalf("expected explicit disable to override default proxy, got enabled=%v url=%q", enabled, url)
+	}
+	stUnset := &db.SystemSettings{ProxyEnabled: false, ProxyEnabledSet: false}
+	if enabled, url := ResolveEffectiveProxy(stUnset, "http://127.0.0.1:7890"); !enabled || url != "http://127.0.0.1:7890" {
+		t.Fatalf("expected unset settings to inherit default env proxy, got enabled=%v url=%q", enabled, url)
+	}
+}

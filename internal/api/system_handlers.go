@@ -12,8 +12,55 @@ import (
 	"walrus/internal/apperr"
 	"walrus/internal/auth"
 	"walrus/internal/db"
+	"walrus/internal/steam"
 	"walrus/internal/updater"
 )
+
+// ResolveEffectiveProxy determines whether the panel-managed proxy is active and returns its raw URL.
+// Precedence: explicit system settings (enabled/disabled + URL) > startup default WALRUS_PROXY_URL.
+func ResolveEffectiveProxy(st *db.SystemSettings, defaultProxyURL string) (bool, string) {
+	def := strings.TrimSpace(defaultProxyURL)
+	if st == nil {
+		return def != "", def
+	}
+	enabled := st.ProxyEnabled
+	if !st.ProxyEnabledSet {
+		enabled = def != ""
+	}
+	if !enabled {
+		return false, ""
+	}
+	if raw := strings.TrimSpace(st.ProxyURL); raw != "" {
+		return true, raw
+	}
+	return def != "", def
+}
+
+func (s *Server) decoratePublicSettings(st *db.SystemSettings) {
+	if st == nil {
+		return
+	}
+	st.HasDefaultSteamAPIKey = strings.TrimSpace(s.cfg.SteamAPIKey) != ""
+	defProxy := strings.TrimSpace(s.cfg.ProxyURL)
+	st.HasDefaultProxyURL = defProxy != ""
+	if defProxy != "" {
+		st.DefaultProxyURL, _ = db.MaskProxyURL(defProxy)
+	}
+	if !st.ProxyEnabledSet && defProxy != "" {
+		st.ProxyEnabled = true
+	}
+}
+
+func (s *Server) applyActiveProxy(st *db.SystemSettings) error {
+	_, effective := ResolveEffectiveProxy(st, s.cfg.ProxyURL)
+	if err := s.steamMgr.SetProxy(effective); err != nil {
+		return err
+	}
+	if err := s.modSvc.SetProxy(effective); err != nil {
+		return err
+	}
+	return nil
+}
 
 func (s *Server) handleSystemMetrics(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
@@ -27,11 +74,12 @@ func (s *Server) handleGetSettings(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, err)
 		return
 	}
-	st.HasDefaultSteamAPIKey = strings.TrimSpace(s.cfg.SteamAPIKey) != ""
+	s.decoratePublicSettings(st)
 	c.JSON(http.StatusOK, gin.H{
-		"settings":     st,
-		"runtime_mode": s.driver.Mode(),
-		"data_dir":     s.cfg.DataDir,
+		"settings":          st,
+		"runtime_mode":      s.driver.Mode(),
+		"data_dir":          s.cfg.DataDir,
+		"proxychains_ready": s.steamMgr.ProxyChainsReady(),
 	})
 }
 
@@ -40,6 +88,8 @@ type updateSettingsRequest struct {
 	PortPoolEnd         *int    `json:"port_pool_end"`
 	DefaultClusterToken *string `json:"default_cluster_token"` // nil = keep; "" = clear; value = update
 	SteamAPIKey         *string `json:"steam_api_key"`
+	ProxyEnabled        *bool   `json:"proxy_enabled"`
+	ProxyURL            *string `json:"proxy_url"` // nil = keep; "" = clear; value = update
 	DSTBranch           *string `json:"dst_branch"`
 	DSTArch             *string `json:"dst_arch"`
 	AutoUpdateMode      *string `json:"auto_update_mode"`
@@ -71,6 +121,37 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 		respondCodeError(c, http.StatusBadRequest, apperr.CodeInvalidPortPoolRange, "invalid port pool range (must be within 1024-65535 and span at least 7 ports)")
 		return
 	}
+
+	// Validate proxy settings before persisting any mutations.
+	nextProxyURL := cur.ProxyURL
+	if req.ProxyURL != nil {
+		trimmed := strings.TrimSpace(*req.ProxyURL)
+		if trimmed != "" {
+			parsed, err := steam.ParseProxyURL(trimmed)
+			if err != nil {
+				respondError(c, http.StatusBadRequest, err)
+				return
+			}
+			nextProxyURL = parsed.String()
+		} else {
+			nextProxyURL = ""
+		}
+	}
+	nextProxyEnabled := cur.ProxyEnabled
+	nextProxyEnabledSet := cur.ProxyEnabledSet
+	if req.ProxyEnabled != nil {
+		nextProxyEnabled = *req.ProxyEnabled
+		nextProxyEnabledSet = true
+	}
+	effectiveEnabled := nextProxyEnabled
+	if !nextProxyEnabledSet {
+		effectiveEnabled = strings.TrimSpace(s.cfg.ProxyURL) != ""
+	}
+	if effectiveEnabled && strings.TrimSpace(nextProxyURL) == "" && strings.TrimSpace(s.cfg.ProxyURL) == "" {
+		respondCodeError(c, http.StatusBadRequest, apperr.CodeInvalidProxyURL, "proxy URL is required when network proxy is enabled")
+		return
+	}
+
 	_ = s.store.SetSetting("port_pool_start", strconv.Itoa(start))
 	_ = s.store.SetSetting("port_pool_end", strconv.Itoa(end))
 
@@ -79,6 +160,12 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 	}
 	if req.SteamAPIKey != nil {
 		_ = s.store.SetSetting("steam_api_key", strings.TrimSpace(*req.SteamAPIKey))
+	}
+	if req.ProxyURL != nil {
+		_ = s.store.SetSetting("proxy_url", nextProxyURL)
+	}
+	if req.ProxyEnabled != nil {
+		_ = s.store.SetSetting("proxy_enabled", strconv.FormatBool(*req.ProxyEnabled))
 	}
 	if req.DSTBranch != nil {
 		b := strings.TrimSpace(*req.DSTBranch)
@@ -102,14 +189,59 @@ func (s *Server) handleUpdateSettings(c *gin.Context) {
 		_ = s.store.SetSetting("backup_max_retain", strconv.Itoa(*req.BackupMaxRetain))
 	}
 
+	if fullSettings, err := s.store.GetSystemSettings(true); err == nil {
+		_ = s.applyActiveProxy(fullSettings)
+	}
+
 	u := auth.CurrentUser(c)
 	s.store.AddAuditLog(u.Username, "system.settings.update", "settings", "Updated global system settings", c.ClientIP())
 
 	updated, _ := s.store.GetSystemSettings(false)
-	if updated != nil {
-		updated.HasDefaultSteamAPIKey = strings.TrimSpace(s.cfg.SteamAPIKey) != ""
+	s.decoratePublicSettings(updated)
+	c.JSON(http.StatusOK, gin.H{
+		"settings":          updated,
+		"proxychains_ready": s.steamMgr.ProxyChainsReady(),
+	})
+}
+
+type testProxyRequest struct {
+	ProxyURL string `json:"proxy_url"`
+}
+
+func (s *Server) handleTestProxy(c *gin.Context) {
+	var req testProxyRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		respondBindError(c, err)
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"settings": updated})
+
+	targetProxy := strings.TrimSpace(req.ProxyURL)
+	if targetProxy == "" {
+		if st, err := s.store.GetSystemSettings(true); err == nil {
+			if raw := strings.TrimSpace(st.ProxyURL); raw != "" {
+				targetProxy = raw
+			}
+		}
+		if targetProxy == "" {
+			targetProxy = strings.TrimSpace(s.cfg.ProxyURL)
+		}
+	}
+	if targetProxy == "" {
+		respondCodeError(c, http.StatusBadRequest, apperr.CodeInvalidProxyURL, "proxy URL is required to test connectivity")
+		return
+	}
+
+	if _, err := steam.ParseProxyURL(targetProxy); err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	res, err := steam.TestProxyConnectivity(c.Request.Context(), targetProxy, "")
+	if err != nil {
+		respondError(c, http.StatusBadGateway, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"result": res})
 }
 
 func (s *Server) handleListAuditLogs(c *gin.Context) {
