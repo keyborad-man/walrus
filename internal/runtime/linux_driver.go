@@ -28,6 +28,7 @@ type managedProc struct {
 	pid           int
 	startedAt     time.Time
 	stopRequested bool
+	prepareCancel context.CancelFunc
 	fatalError    string
 	lastLuaError  string
 	restartCount  int
@@ -110,10 +111,29 @@ func (d *LinuxDriver) binaryPath(arch string) (binDir string, binPath string, er
 	return binDir, binPath, nil
 }
 
+func (d *LinuxDriver) buildShardArgs(clusterID, shardTitle string) []string {
+	// DST expects -persistent_storage_root <dataDir> -conf_dir clusters -cluster <clusterID> -shard <Master|Caves>.
+	// Walrus downloads and installs Workshop mods directly into dst-server/mods/workshop-<id> via SteamCMD,
+	// so pass -skip_update_server_mods to prevent DST's built-in Steamworks UGC downloader from running
+	// asynchronously or failing with missing Steam library folder errors during boot.
+	return []string{
+		"-console",
+		"-persistent_storage_root", d.dataDir,
+		"-conf_dir", "clusters",
+		"-cluster", clusterID,
+		"-shard", shardTitle,
+		"-skip_update_server_mods",
+	}
+}
+
 func (d *LinuxDriver) StartShard(ctx context.Context, clusterID, shard string, opts StartOptions) error {
 	shard = strings.ToLower(shard)
 	if shard != "master" && shard != "caves" {
 		return apperr.Newf(apperr.CodeInvalidShard, map[string]any{"shard": shard}, "invalid shard: %s", shard)
+	}
+	binDir, binPath, err := d.binaryPath(opts.Arch)
+	if err != nil {
+		return err
 	}
 	k := d.key(clusterID, shard)
 
@@ -122,9 +142,134 @@ func (d *LinuxDriver) StartShard(ctx context.Context, clusterID, shard string, o
 		d.mu.Unlock()
 		return apperr.Newf(apperr.CodeShardAlreadyActive, map[string]any{"cluster_id": clusterID, "shard": shard, "state": string(existing.state)}, "shard %s/%s is already %s", clusterID, shard, existing.state)
 	}
+	if opts.Prepare != nil {
+		prepCtx, prepCancel := context.WithCancel(context.Background())
+		mp := &managedProc{
+			clusterID:     clusterID,
+			shard:         shard,
+			opts:          opts,
+			state:         StateStarting,
+			startedAt:     time.Now().UTC(),
+			prepareCancel: prepCancel,
+			doneCh:        make(chan struct{}),
+		}
+		d.procs[k] = mp
+		d.mu.Unlock()
+		go d.prepareAndSpawn(prepCtx, prepCancel, mp, binDir, binPath)
+		return nil
+	}
 	d.mu.Unlock()
 
 	return d.spawn(clusterID, shard, opts, 0, nil)
+}
+
+func (d *LinuxDriver) prepareAndSpawn(prepCtx context.Context, prepCancel context.CancelFunc, mp *managedProc, binDir, binPath string) {
+	defer prepCancel()
+
+	prepErr := mp.opts.Prepare(prepCtx, func(level, msg string) {
+		d.logs.Publish(mp.clusterID, mp.shard, level, msg)
+	})
+
+	d.mu.Lock()
+	mp.prepareCancel = nil
+	if mp.stopRequested || prepCtx.Err() != nil {
+		mp.state = StateStopped
+		mp.pid = 0
+		close(mp.doneCh)
+		d.mu.Unlock()
+		d.logs.Publish(mp.clusterID, mp.shard, "system", "[walrus] Shard startup cancelled before launch.")
+		return
+	}
+	if prepErr != nil {
+		errMsg := prepErr.Error()
+		mp.state = StateCrashed
+		mp.fatalError = errMsg
+		mp.lastError = errMsg
+		mp.pid = 0
+		close(mp.doneCh)
+		d.mu.Unlock()
+		d.logs.Publish(mp.clusterID, mp.shard, "error", fmt.Sprintf("[walrus] Pre-launch mod preparation failed: %s (launch aborted to protect world save)", errMsg))
+		d.emitEvent("server.crash", "DST Shard Startup Failed", fmt.Sprintf("Shard %s failed to prepare mods: %s", mp.shard, errMsg), mp.clusterID)
+		return
+	}
+	d.mu.Unlock()
+
+	shardTitle := "Master"
+	if mp.shard == "caves" {
+		shardTitle = "Caves"
+	}
+
+	cmd := exec.Command(binPath, d.buildShardArgs(mp.clusterID, shardTitle)...)
+	cmd.Dir = binDir
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		d.failPreparedStart(mp, fmt.Errorf("open stdin pipe: %w", err))
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		d.failPreparedStart(mp, fmt.Errorf("open stdout pipe: %w", err))
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		d.failPreparedStart(mp, fmt.Errorf("open stderr pipe: %w", err))
+		return
+	}
+
+	d.mu.Lock()
+	if mp.stopRequested {
+		mp.state = StateStopped
+		mp.pid = 0
+		close(mp.doneCh)
+		d.mu.Unlock()
+		_ = stdin.Close()
+		d.logs.Publish(mp.clusterID, mp.shard, "system", "[walrus] Shard startup cancelled before launch.")
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		errMsg := fmt.Sprintf("start DST shard %s/%s: %v", mp.clusterID, mp.shard, err)
+		mp.state = StateCrashed
+		mp.fatalError = errMsg
+		mp.lastError = errMsg
+		mp.pid = 0
+		close(mp.doneCh)
+		d.mu.Unlock()
+		_ = stdin.Close()
+		d.logs.Publish(mp.clusterID, mp.shard, "error", "[walrus] "+errMsg)
+		d.emitEvent("server.crash", "DST Shard Startup Failed", errMsg, mp.clusterID)
+		return
+	}
+	mp.cmd = cmd
+	mp.stdin = stdin
+	mp.pid = cmd.Process.Pid
+	pid := mp.pid
+	d.mu.Unlock()
+
+	d.logs.Publish(mp.clusterID, mp.shard, "system", fmt.Sprintf("[walrus] Launched %s shard (PID %d)", shardTitle, pid))
+
+	go d.streamOutput(mp, stdout, false)
+	go d.streamOutput(mp, stderr, true)
+	go d.waitLoop(mp)
+	if mp.shard == "master" {
+		go d.probeLoop(mp)
+	}
+}
+
+func (d *LinuxDriver) failPreparedStart(mp *managedProc, err error) {
+	errMsg := err.Error()
+	d.mu.Lock()
+	mp.state = StateCrashed
+	mp.fatalError = errMsg
+	mp.lastError = errMsg
+	mp.pid = 0
+	close(mp.doneCh)
+	d.mu.Unlock()
+	d.logs.Publish(mp.clusterID, mp.shard, "error", fmt.Sprintf("[walrus] Failed to launch shard: %s", errMsg))
+	d.emitEvent("server.crash", "DST Shard Startup Failed", fmt.Sprintf("Shard %s failed to start: %s", mp.shard, errMsg), mp.clusterID)
 }
 
 func (d *LinuxDriver) spawn(clusterID, shard string, opts StartOptions, restartCount int, crashWindow []time.Time) error {
@@ -138,16 +283,7 @@ func (d *LinuxDriver) spawn(clusterID, shard string, opts StartOptions, restartC
 		shardTitle = "Caves"
 	}
 
-	// DST expects -persistent_storage_root <dataDir> -conf_dir clusters -cluster <clusterID> -shard <Master|Caves>
-	args := []string{
-		"-console",
-		"-persistent_storage_root", d.dataDir,
-		"-conf_dir", "clusters",
-		"-cluster", clusterID,
-		"-shard", shardTitle,
-	}
-
-	cmd := exec.Command(binPath, args...)
+	cmd := exec.Command(binPath, d.buildShardArgs(clusterID, shardTitle)...)
 	cmd.Dir = binDir
 
 	stdin, err := cmd.StdinPipe()
@@ -445,14 +581,20 @@ func (d *LinuxDriver) StopShard(ctx context.Context, clusterID, shard string) er
 	}
 	mp.stopRequested = true
 	mp.state = StateStopping
+	prepareCancel := mp.prepareCancel
 	stdin := mp.stdin
 	doneCh := mp.doneCh
 	cmd := mp.cmd
 	d.mu.Unlock()
 
-	d.logs.Publish(clusterID, shard, "system", "[walrus] Sending graceful shutdown: c_shutdown(true)")
+	if prepareCancel != nil {
+		prepareCancel()
+	}
 	if stdin != nil {
+		d.logs.Publish(clusterID, shard, "system", "[walrus] Sending graceful shutdown: c_shutdown(true)")
 		_, _ = io.WriteString(stdin, "c_shutdown(true)\n")
+	} else {
+		d.logs.Publish(clusterID, shard, "system", "[walrus] Cancelling shard startup...")
 	}
 
 	timeout := 20 * time.Second

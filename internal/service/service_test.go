@@ -2,14 +2,17 @@ package service
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"walrus/internal/apperr"
 	"walrus/internal/db"
 	"walrus/internal/dst"
 	"walrus/internal/lua"
 	"walrus/internal/runtime"
+	"walrus/internal/steam"
 )
 
 func TestClusterAndBackupLifecycle(t *testing.T) {
@@ -169,4 +172,191 @@ func TestStartShardBackfillsMissingLevelDataDefaults(t *testing.T) {
 	if cavesParsed.Overrides["task_set"] != "cave_default" || cavesParsed.Overrides["layout_mode"] != "RestrictNodesByKey" {
 		t.Fatalf("expected caves task_set=cave_default and layout_mode=RestrictNodesByKey, got %+v", cavesParsed.Overrides)
 	}
+}
+
+func TestRedownloadWorkshopModValidation(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	localModsDir := filepath.Join(tmp, "local-mods")
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	workshop := steam.NewWorkshopClient("mock")
+	modSvc := NewModService(dstDir, localModsDir, store, fs, steamMgr, workshop)
+
+	// Invalid modinfo.lua should surface MODINFO_PARSE_FAILED instead of silent success.
+	badDir := filepath.Join(dstDir, "mods", "workshop-2007975851")
+	if err := os.MkdirAll(badDir, 0o755); err != nil {
+		t.Fatalf("mkdir bad mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badDir, "modinfo.lua"), []byte(`name = (`), 0o644); err != nil {
+		t.Fatalf("write invalid modinfo: %v", err)
+	}
+
+	err = modSvc.RedownloadWorkshopMod(context.Background(), "workshop-2007975851", "zh-CN")
+	code, _, _ := apperr.Extract(err, "")
+	if code != apperr.CodeModInfoParseFailed {
+		t.Fatalf("expected %s for invalid modinfo.lua, got code=%q err=%v", apperr.CodeModInfoParseFailed, code, err)
+	}
+
+	// Valid modinfo.lua should succeed and populate ModCache.
+	if err := os.RemoveAll(badDir); err != nil {
+		t.Fatalf("remove bad mod: %v", err)
+	}
+	if err := modSvc.RedownloadWorkshopMod(context.Background(), "workshop-378160973", "zh-CN"); err != nil {
+		t.Fatalf("redownload valid mod: %v", err)
+	}
+	cache, err := store.GetModCache("workshop-378160973")
+	if err != nil {
+		t.Fatalf("get mod cache: %v", err)
+	}
+	if cache.Version != "1.7.4" || cache.Name == "" {
+		t.Fatalf("expected cached metadata from modinfo.lua, got %+v", cache)
+	}
+}
+
+func TestStartClusterAutoDownloadsMissingMods(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	localModsDir := filepath.Join(tmp, "local-mods")
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	workshop := steam.NewWorkshopClient("mock")
+	modSvc := NewModService(dstDir, localModsDir, store, fs, steamMgr, workshop)
+	clusterSvc := NewClusterService(store, fs, driver)
+	clusterSvc.SetModService(modSvc)
+
+	if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:    "modded_world",
+		ClusterName:  "Modded World",
+		GameMode:     "endless",
+		CavesEnabled: true,
+	}); err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+
+	// Stage a local mod in localModsDir only (not yet mirrored into dst-server/mods).
+	localSrc := filepath.Join(localModsDir, "local-custom")
+	if err := os.MkdirAll(localSrc, 0o755); err != nil {
+		t.Fatalf("mkdir local mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localSrc, "modinfo.lua"), []byte(`name = "Custom Local"`), 0o644); err != nil {
+		t.Fatalf("write local modinfo: %v", err)
+	}
+
+	// Configure enabled workshop mods (not downloaded yet), a disabled workshop mod, and the local mod.
+	overridesLua := `return {
+  ["workshop-378160973"] = { enabled = true, configuration_options = {} },
+  ["workshop-1909182187"] = { enabled = true, configuration_options = {} },
+  ["workshop-999999999"] = { enabled = false, configuration_options = {} },
+  ["local-custom"] = { enabled = true, configuration_options = {} },
+}
+`
+	if err := fs.WriteModOverrides("modded_world", "master", overridesLua); err != nil {
+		t.Fatalf("write master modoverrides: %v", err)
+	}
+	if err := fs.WriteModOverrides("modded_world", "caves", overridesLua); err != nil {
+		t.Fatalf("write caves modoverrides: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := clusterSvc.StartCluster(ctx, "modded_world"); err != nil {
+		t.Fatalf("start cluster: %v", err)
+	}
+	defer func() { _ = clusterSvc.StopCluster(ctx, "modded_world") }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ms := driver.GetShardStatus("modded_world", "master")
+		cs := driver.GetShardStatus("modded_world", "caves")
+		if ms.State == runtime.StateRunning && cs.State == runtime.StateRunning {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st := driver.GetShardStatus("modded_world", "master"); st.State != runtime.StateRunning {
+		t.Fatalf("expected master running after auto-downloading mods, got %+v", st)
+	}
+	if st := driver.GetShardStatus("modded_world", "caves"); st.State != runtime.StateRunning {
+		t.Fatalf("expected caves running after auto-downloading mods, got %+v", st)
+	}
+
+	// Enabled workshop mods must be downloaded into dst-server/mods.
+	for _, wid := range []string{"378160973", "1909182187"} {
+		if _, err := os.Stat(filepath.Join(dstDir, "mods", "workshop-"+wid, "modinfo.lua")); err != nil {
+			t.Fatalf("expected enabled workshop-%s to be auto-downloaded: %v", wid, err)
+		}
+	}
+	// Disabled workshop mod must NOT be downloaded.
+	if _, err := os.Stat(filepath.Join(dstDir, "mods", "workshop-999999999")); err == nil {
+		t.Fatal("expected disabled workshop-999999999 not to be downloaded")
+	}
+	// Local mod must be mirrored into dst-server/mods.
+	if _, err := os.Stat(filepath.Join(dstDir, "mods", "local-custom", "modinfo.lua")); err != nil {
+		t.Fatalf("expected local-custom to be mirrored into dst-server/mods: %v", err)
+	}
+	// ModCache should be refreshed for auto-downloaded workshop mods.
+	if cache, err := store.GetModCache("workshop-378160973"); err != nil || cache.Name == "" {
+		t.Fatalf("expected mod cache populated for workshop-378160973, got %+v err=%v", cache, err)
+	}
+}
+
+func TestStartShardAbortsWhenEnabledLocalModMissing(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	localModsDir := filepath.Join(tmp, "local-mods")
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	workshop := steam.NewWorkshopClient("mock")
+	modSvc := NewModService(dstDir, localModsDir, store, fs, steamMgr, workshop)
+	clusterSvc := NewClusterService(store, fs, driver)
+	clusterSvc.SetModService(modSvc)
+
+	if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:    "missing_local",
+		ClusterName:  "Missing Local",
+		GameMode:     "endless",
+		CavesEnabled: false,
+	}); err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+	if err := fs.WriteModOverrides("missing_local", "master", `return { ["local-nonexistent"] = { enabled = true } }`); err != nil {
+		t.Fatalf("write modoverrides: %v", err)
+	}
+
+	if err := clusterSvc.StartShard(context.Background(), "missing_local", "master"); err != nil {
+		t.Fatalf("StartShard should enter starting state, got %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		st := driver.GetShardStatus("missing_local", "master")
+		if st.State == runtime.StateCrashed {
+			if st.LastError == "" {
+				t.Fatal("expected LastError to explain missing local mod")
+			}
+			return
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatalf("expected shard to abort into crashed state when enabled local mod is missing, got %+v", driver.GetShardStatus("missing_local", "master"))
 }

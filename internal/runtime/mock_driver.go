@@ -20,9 +20,11 @@ import (
 type mockShard struct {
 	clusterID string
 	shard     string
+	opts      StartOptions
 	state     ShardState
 	pid       int
 	startedAt time.Time
+	lastError string
 	cancel    context.CancelFunc
 	fileMu    sync.Mutex
 	logFile   *os.File
@@ -167,6 +169,7 @@ func (d *MockDriver) StartShard(ctx context.Context, clusterID, shard string, op
 	ms := &mockShard{
 		clusterID: clusterID,
 		shard:     shard,
+		opts:      opts,
 		state:     StateStarting,
 		pid:       int(d.pidSeq.Add(1)),
 		startedAt: time.Now().UTC(),
@@ -185,6 +188,33 @@ func (d *MockDriver) runMockLoop(ctx context.Context, ms *mockShard, w *mockWorl
 	shardTitle := "Master"
 	if ms.shard == "caves" {
 		shardTitle = "Caves"
+	}
+
+	if ms.opts.Prepare != nil {
+		if err := ms.opts.Prepare(ctx, func(level, msg string) {
+			d.emit(ms, level, msg)
+		}); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			d.emit(ms, "error", fmt.Sprintf("[walrus] Pre-launch mod preparation failed: %s (launch aborted to protect world save)", err.Error()))
+			d.mu.Lock()
+			ms.state = StateCrashed
+			ms.lastError = err.Error()
+			ms.pid = 0
+			ms.fileMu.Lock()
+			if ms.logFile != nil {
+				_ = ms.logFile.Close()
+				ms.logFile = nil
+			}
+			ms.fileMu.Unlock()
+			d.mu.Unlock()
+			d.emitEvent("server.crash", "DST Shard Startup Failed", fmt.Sprintf("Shard %s failed to prepare mods: %s", ms.shard, err.Error()), ms.clusterID)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
 	}
 
 	d.emit(ms, "system", fmt.Sprintf("[walrus] Starting %s shard (Mock Runtime, PID %d)...", shardTitle, ms.pid))
@@ -272,7 +302,10 @@ func (d *MockDriver) StopShard(ctx context.Context, clusterID, shard string) err
 	k := d.key(clusterID, shard)
 	d.mu.Lock()
 	ms, ok := d.shards[k]
-	if !ok || ms.state == StateStopped {
+	if !ok || ms.state == StateStopped || ms.state == StateCrashed {
+		if ok {
+			ms.state = StateStopped
+		}
 		d.mu.Unlock()
 		return nil
 	}
@@ -425,6 +458,13 @@ func (d *MockDriver) GetShardStatus(clusterID, shard string) ShardStatus {
 	if !ok || ms.state == StateStopped {
 		return ShardStatus{Shard: shard, State: StateStopped}
 	}
+	if ms.state == StateCrashed {
+		return ShardStatus{
+			Shard:     shard,
+			State:     StateCrashed,
+			LastError: ms.lastError,
+		}
+	}
 	started := ms.startedAt
 	uptime := int64(time.Since(started).Seconds())
 	cpu := 2.4
@@ -441,6 +481,7 @@ func (d *MockDriver) GetShardStatus(clusterID, shard string) ShardStatus {
 		UptimeSec:  uptime,
 		CPUPercent: cpu,
 		MemoryMB:   mem,
+		LastError:  ms.lastError,
 	}
 }
 

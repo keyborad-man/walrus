@@ -139,6 +139,147 @@ func TestCheckUpdateGitHubReleaseAndGHCRFallback(t *testing.T) {
 	}
 }
 
+func TestCheckUpdateWaitsForGHCRImagePublish(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/walrus/releases/latest":
+			w.WriteHeader(http.StatusNotFound)
+		case "/repos/owner/walrus/tags":
+			_ = json.NewEncoder(w).Encode([]map[string]string{
+				{"name": "v0.3.0"},
+				{"name": "v0.2.0"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer gh.Close()
+
+	var (
+		mu         sync.Mutex
+		ghcrStatus = http.StatusNotFound
+	)
+	ghcr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		code := ghcrStatus
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/token":
+			_ = json.NewEncoder(w).Encode(map[string]string{"token": "anon-tok"})
+		case "/v2/owner/walrus/manifests/v0.3.0":
+			if code == http.StatusOK {
+				w.Header().Set("Docker-Content-Digest", "sha256:v030digest")
+			}
+			w.WriteHeader(code)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ghcr.Close()
+
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/_ping":
+			_, _ = w.Write([]byte("OK"))
+		case "/containers/abcdef123456/json":
+			_ = json.NewEncoder(w).Encode(ContainerInspect{
+				ID:     "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+				Name:   "/walrus",
+				Image:  "sha256:localimgid",
+				Config: &ContainerConfig{Image: "ghcr.io/owner/walrus:latest"},
+			})
+		case "/images/sha256:localimgid/json":
+			_ = json.NewEncoder(w).Encode(ImageInspect{
+				ID:          "sha256:localimgid",
+				RepoDigests: []string{"ghcr.io/owner/walrus@sha256:olddigest111"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer dockerSrv.Close()
+
+	svc := NewService("owner/walrus", "ghcr.io/owner/walrus", "/var/run/docker.sock", "linux")
+	svc.githubAPIBase = gh.URL
+	svc.ghcrBase = ghcr.URL
+	svc.dockerClient = NewDockerClientWithHTTP(dockerSrv.URL, dockerSrv.Client())
+	svc.detectInDocker = func() bool { return true }
+	svc.detectSelfID = func() string { return "abcdef123456" }
+	svc.currentInfo = func() version.Info {
+		return version.Info{Version: "v0.2.0", Commit: "881ade6"}
+	}
+
+	// 1. Tag exists on GitHub, but GHCR image is still building (404) -> mark pending, do not mark update available yet.
+	stPending, err := svc.CheckUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("CheckUpdate (pending) failed: %v", err)
+	}
+	if stPending.LatestVersion != "v0.3.0" || stPending.Source != "github_tag" {
+		t.Fatalf("expected latest v0.3.0 from github_tag, got: %+v", stPending)
+	}
+	if stPending.UpdateAvailable {
+		t.Fatalf("expected UpdateAvailable=false while GHCR image is 404, got true")
+	}
+	if !stPending.Docker.TargetImagePending {
+		t.Fatalf("expected Docker.TargetImagePending=true while GHCR image is 404")
+	}
+
+	// 2. GHCR returns transient 503 -> degrade gracefully and allow upgrade rather than blocking.
+	mu.Lock()
+	ghcrStatus = http.StatusServiceUnavailable
+	mu.Unlock()
+	stDegraded, err := svc.CheckUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("CheckUpdate (503 degraded) failed: %v", err)
+	}
+	if !stDegraded.UpdateAvailable || stDegraded.Docker.TargetImagePending {
+		t.Fatalf("expected graceful fallback on transient GHCR 503, got: %+v", stDegraded)
+	}
+
+	// 3. GHCR image finishes publishing (200) -> ready to upgrade with remote digest populated.
+	mu.Lock()
+	ghcrStatus = http.StatusOK
+	mu.Unlock()
+	stReady, err := svc.CheckUpdate(context.Background())
+	if err != nil {
+		t.Fatalf("CheckUpdate (ready) failed: %v", err)
+	}
+	if !stReady.UpdateAvailable || stReady.Docker.TargetImagePending || stReady.RemoteDigest != "sha256:v030digest" {
+		t.Fatalf("expected ready update status once GHCR image is published, got: %+v", stReady)
+	}
+}
+
+func TestPullWithFallbackFriendlyNotFoundError(t *testing.T) {
+	var pulled []string
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/images/create" {
+			tag := r.URL.Query().Get("tag")
+			pulled = append(pulled, tag)
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"message": "manifest for ghcr.io/owner/walrus:" + tag + " not found",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer dockerSrv.Close()
+
+	svc := NewService("owner/walrus", "ghcr.io/owner/walrus", "/var/run/docker.sock", "linux")
+	svc.dockerClient = NewDockerClientWithHTTP(dockerSrv.URL, dockerSrv.Client())
+
+	_, err := svc.pullWithFallback(context.Background(), "ghcr.io/owner/walrus:v0.3.0", nil)
+	if err == nil {
+		t.Fatal("expected error when both v0.3.0 and 0.3.0 return 404")
+	}
+	if len(pulled) != 2 || pulled[0] != "v0.3.0" || pulled[1] != "0.3.0" {
+		t.Fatalf("expected fallback pull order [v0.3.0 0.3.0], got %v", pulled)
+	}
+	if !strings.Contains(err.Error(), "not yet published") {
+		t.Fatalf("expected friendly not-yet-published hint in error, got: %v", err)
+	}
+}
+
 func TestExecuteContainerSwapAndRollback(t *testing.T) {
 	var (
 		mu      sync.Mutex

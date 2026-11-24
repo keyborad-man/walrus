@@ -49,6 +49,7 @@ type ModService struct {
 	fs           *dst.FS
 	steamMgr     *steam.Manager
 	workshop     *steam.WorkshopClient
+	prepareSem   chan struct{}
 }
 
 func NewModService(dstServerDir, localModsDir string, store *db.Store, fs *dst.FS, steamMgr *steam.Manager, workshop *steam.WorkshopClient) *ModService {
@@ -59,11 +60,125 @@ func NewModService(dstServerDir, localModsDir string, store *db.Store, fs *dst.F
 		fs:           fs,
 		steamMgr:     steamMgr,
 		workshop:     workshop,
+		prepareSem:   make(chan struct{}, 1),
 	}
 }
 
 func (s *ModService) dstModsDir() string {
 	return filepath.Join(s.dstServerDir, "mods")
+}
+
+func (s *ModService) hasInstalledDSTMod(modID string) bool {
+	fi, err := os.Stat(filepath.Join(s.dstModsDir(), modID, "modinfo.lua"))
+	return err == nil && !fi.IsDir()
+}
+
+// EnsureShardModsReady verifies that every enabled mod in a shard's modoverrides.lua
+// is present under dst-server/mods/<modID>. Missing Workshop mods are downloaded
+// automatically via SteamCMD in a single batch; missing local mods are mirrored from
+// localModsDir when available.
+func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard string, logFn func(level, msg string)) error {
+	emit := func(level, msg string) {
+		if logFn != nil {
+			logFn(level, msg)
+		}
+	}
+
+	// Serialize concurrent shard starts (e.g., Master + Caves starting together)
+	// so the second shard reuses mods already downloaded by the first instead of hitting STEAMCMD_BUSY.
+	if s.prepareSem != nil {
+		select {
+		case s.prepareSem <- struct{}{}:
+			defer func() { <-s.prepareSem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	raw, err := s.fs.ReadModOverrides(clusterID, shard)
+	if err != nil {
+		return err
+	}
+	overrides, err := lua.ParseModOverrides(raw)
+	if err != nil {
+		return err
+	}
+
+	modIDs := make([]string, 0, len(overrides))
+	for id, ov := range overrides {
+		if ov.Enabled {
+			modIDs = append(modIDs, id)
+		}
+	}
+	sort.Strings(modIDs)
+
+	var missingWorkshopIDs []string
+	var missingLocalIDs []string
+	for _, modID := range modIDs {
+		if s.hasInstalledDSTMod(modID) {
+			continue
+		}
+		if strings.HasPrefix(modID, "workshop-") {
+			wid := strings.TrimSpace(strings.TrimPrefix(modID, "workshop-"))
+			if wid != "" {
+				missingWorkshopIDs = append(missingWorkshopIDs, wid)
+			}
+			continue
+		}
+		// Local mod: mirror from localModsDir into dst-server/mods if available.
+		srcDir := filepath.Join(s.localModsDir, modID)
+		if fi, statErr := os.Stat(filepath.Join(srcDir, "modinfo.lua")); statErr == nil && !fi.IsDir() {
+			if copyErr := copyDirSimple(srcDir, filepath.Join(s.dstModsDir(), modID)); copyErr != nil {
+				return fmt.Errorf("mirror local mod %s: %w", modID, copyErr)
+			}
+			emit("system", fmt.Sprintf("[walrus] Mirrored local mod %s into DST mods directory.", modID))
+			continue
+		}
+		missingLocalIDs = append(missingLocalIDs, modID)
+	}
+
+	if len(missingLocalIDs) > 0 {
+		return apperr.Newf(
+			apperr.CodeLocalModNotFound,
+			map[string]any{"mod_id": strings.Join(missingLocalIDs, ", ")},
+			"enabled local mod(s) missing on disk: %s",
+			strings.Join(missingLocalIDs, ", "),
+		)
+	}
+	if len(missingWorkshopIDs) == 0 {
+		return nil
+	}
+
+	emit("system", fmt.Sprintf("[walrus] %d enabled Workshop mod(s) missing locally; downloading via SteamCMD before launching %s...", len(missingWorkshopIDs), shard))
+	if err := s.steamMgr.DownloadWorkshopMods(ctx, missingWorkshopIDs, func(msg string) {
+		emit("system", msg)
+	}); err != nil {
+		return err
+	}
+
+	// Best-effort refresh cached metadata for newly downloaded mods.
+	for _, wid := range missingWorkshopIDs {
+		modID := "workshop-" + wid
+		_, info, cache, _ := s.inspectMod(modID, "zh-CN")
+		if info == nil {
+			continue
+		}
+		if cache == nil {
+			cache = &db.ModCache{ModID: modID, WorkshopID: wid}
+		}
+		if info.Name != "" {
+			cache.Name = info.Name
+		}
+		cache.Author = info.Author
+		cache.Version = info.Version
+		if info.Description != "" && cache.Description == "" {
+			cache.Description = info.Description
+		}
+		cache.ClientOnly = info.ClientOnlyMod
+		_ = s.store.UpsertModCache(cache)
+	}
+	_ = s.SyncDedicatedServerModsSetup()
+	return nil
 }
 
 func (s *ModService) findModInfoPath(modID string) string {
@@ -79,22 +194,22 @@ func (s *ModService) findModInfoPath(modID string) string {
 	return ""
 }
 
-func (s *ModService) inspectMod(modID, locale string) (downloaded bool, info *lua.ModInfo, cache *db.ModCache) {
+func (s *ModService) inspectMod(modID, locale string) (downloaded bool, info *lua.ModInfo, cache *db.ModCache, parseErr error) {
 	cache, _ = s.store.GetModCache(modID)
 	p := s.findModInfoPath(modID)
 	if p == "" {
-		return false, nil, cache
+		return false, nil, cache, nil
 	}
 	downloaded = true
 	raw, err := os.ReadFile(p)
 	if err != nil {
-		return downloaded, nil, cache
+		return downloaded, nil, cache, err
 	}
 	parsed, err := lua.ParseModInfo(string(raw), locale, modID)
-	if err == nil {
-		info = parsed
+	if err != nil {
+		return downloaded, nil, cache, err
 	}
-	return downloaded, info, cache
+	return downloaded, parsed, cache, nil
 }
 
 func (s *ModService) GetClusterMods(clusterID, shard, locale string) (*ClusterModsResponse, error) {
@@ -129,7 +244,7 @@ func (s *ModService) GetClusterMods(clusterID, shard, locale string) (*ClusterMo
 	items := make([]ClusterModItem, 0, len(modIDs))
 	for _, modID := range modIDs {
 		ov := parsedOverrides[modID]
-		downloaded, info, cache := s.inspectMod(modID, locale)
+		downloaded, info, cache, _ := s.inspectMod(modID, locale)
 
 		item := ClusterModItem{
 			ModID:                modID,
@@ -262,7 +377,7 @@ func (s *ModService) AddWorkshopInput(ctx context.Context, clusterID, shard, inp
 			cacheEntry.ClientOnly = d.IsClientOnly
 			cacheEntry.ServerTags = strings.Join(d.Tags, ",")
 		}
-		_, info, _ := s.inspectMod(modID, locale)
+		_, info, _, _ := s.inspectMod(modID, locale)
 		defaults := map[string]any{}
 		if info != nil {
 			if info.Name != "" {
@@ -324,7 +439,7 @@ func (s *ModService) AddLocalModToCluster(clusterID, shard, modID, locale string
 		overrides = map[string]lua.ModOverride{}
 	}
 
-	_, info, _ := s.inspectMod(modID, locale)
+	_, info, _, _ := s.inspectMod(modID, locale)
 	defaults := map[string]any{}
 	if info != nil {
 		for _, opt := range info.ConfigurationOptions {
@@ -417,12 +532,20 @@ func (s *ModService) RedownloadWorkshopMod(ctx context.Context, modID, locale st
 	if _, err := s.steamMgr.DownloadWorkshopMod(ctx, wid); err != nil {
 		return err
 	}
-	_, info, cache := s.inspectMod(modID, locale)
+	downloaded, info, cache, parseErr := s.inspectMod(modID, locale)
+	if !downloaded {
+		return apperr.Newf(apperr.CodeWorkshopDownloadMissing, map[string]any{"path": filepath.Join(s.dstModsDir(), modID, "modinfo.lua")}, "modinfo.lua not found after downloading %s", modID)
+	}
+	if parseErr != nil {
+		return parseErr
+	}
 	if info != nil {
 		if cache == nil {
 			cache = &db.ModCache{ModID: modID, WorkshopID: wid}
 		}
-		cache.Name = info.Name
+		if info.Name != "" {
+			cache.Name = info.Name
+		}
 		cache.Author = info.Author
 		cache.Version = info.Version
 		if info.Description != "" {

@@ -78,6 +78,9 @@ type HostMetrics struct {
 type StartOptions struct {
 	AutoRestart bool
 	Arch        string // "64" or "32"
+	// Prepare runs asynchronously after the shard enters StateStarting and before
+	// the DST server binary is spawned (e.g. downloading missing Workshop mods).
+	Prepare func(ctx context.Context, logFn func(level, msg string)) error
 }
 
 type Driver interface {

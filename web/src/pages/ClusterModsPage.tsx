@@ -910,13 +910,13 @@ export function ClusterModsPage() {
             {!configMod.schema_options || configMod.schema_options.length === 0 ? (
               <p className="text-sm text-muted-foreground py-6 text-center">{t('mods.noOptions')}</p>
             ) : (
-              configMod.schema_options.map((opt: ModConfigOption) => {
+              configMod.schema_options.map((opt: ModConfigOption, optIdx: number) => {
                 const currentVal = draftOpts[opt.name] ?? opt.default
                 const serializedCurrent = JSON.stringify(currentVal)
-                const selectId = `mod-opt-${opt.name}`
+                const selectId = `mod-opt-${opt.name}-${optIdx}`
                 return (
                   <div
-                    key={opt.name}
+                    key={`${opt.name}-${optIdx}`}
                     className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-border bg-secondary/25 p-3"
                   >
                     <div className="min-w-0">

@@ -102,6 +102,7 @@ func main() {
 	clusterSvc := service.NewClusterService(store, dstFS, driver)
 	backupSvc := service.NewBackupService(cfg.BackupsDir(), store, dstFS, driver)
 	modSvc := service.NewModService(cfg.DSTServerDir(), cfg.LocalModsDir(), store, dstFS, steamMgr, workshopClient)
+	clusterSvc.SetModService(modSvc)
 	fileSvc := service.NewFileService(dstFS)
 	cronSvc := service.NewCronService(store, dstFS, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
 

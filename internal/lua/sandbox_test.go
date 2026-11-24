@@ -68,6 +68,56 @@ configuration_options = {
 	}
 }
 
+func TestParseModInfoSkipsDecorativeDividers(t *testing.T) {
+	// Matches Legion (workshop-2007975851) pattern with repeated "Title" section dividers.
+	sample := `
+name = "[DST] Legion-棱镜"
+author = "ti_Tout"
+version = "6.1.1"
+description = "Version " .. version
+api_version = 10
+dst_compatible = true
+all_clients_require_mod = true
+client_only_mod = false
+configuration_options = {
+	{name = "Title", label = "Language", options = {{description = "", data = ""}}, default = ""},
+	{
+		name = "Language",
+		label = "Language",
+		options = {
+			{description = "Auto", data = "auto"},
+			{description = "中文", data = "chinese"},
+		},
+		default = "auto",
+	},
+	{name = "Title", label = "", options = {{description = "", data = ""}}, default = ""},
+	{name = "Title", label = "ThePowerOfFlowers", options = {{description = "", data = ""}}, default = ""},
+	{
+		name = "FlowersPower",
+		label = "Flowers' Power",
+		options = {
+			{description = "Yes", data = true},
+			{description = "No", data = false},
+		},
+		default = true,
+	},
+}
+`
+	info, err := ParseModInfo(sample, "zh-CN", "workshop-2007975851")
+	if err != nil {
+		t.Fatalf("parse legion-style modinfo: %v", err)
+	}
+	if info.Version != "6.1.1" {
+		t.Fatalf("expected version 6.1.1, got %q", info.Version)
+	}
+	if len(info.ConfigurationOptions) != 2 {
+		t.Fatalf("expected 2 real options (skipping Title dividers), got %d: %+v", len(info.ConfigurationOptions), info.ConfigurationOptions)
+	}
+	if info.ConfigurationOptions[0].Name != "Language" || info.ConfigurationOptions[1].Name != "FlowersPower" {
+		t.Fatalf("unexpected option names: %+v", info.ConfigurationOptions)
+	}
+}
+
 func TestLosslessLevelDataPatchAndModOverridesRoundTrip(t *testing.T) {
 	orig := `return {
   id = "ENDLESS",

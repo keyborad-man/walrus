@@ -54,6 +54,7 @@ func setupTestEngine(t *testing.T) (http.Handler, func()) {
 	clusterSvc := service.NewClusterService(store, fs, driver)
 	backupSvc := service.NewBackupService(cfg.BackupsDir(), store, fs, driver)
 	modSvc := service.NewModService(cfg.DSTServerDir(), cfg.LocalModsDir(), store, fs, steamMgr, workshop)
+	clusterSvc.SetModService(modSvc)
 	fileSvc := service.NewFileService(fs)
 	cronSvc := service.NewCronService(store, fs, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
 	_ = cronSvc.Start()

@@ -187,14 +187,27 @@ func ParseModInfo(src, uiLocale, folderName string) (*ModInfo, error) {
 					opt.Options = append(opt.Options, choice)
 				}
 			}
-			// Keep valid configurable options (skip pure decorative empty dividers with empty name).
-			if opt.Name != "" && len(opt.Options) > 0 {
+			// Keep valid configurable options (skip pure decorative dividers/headers).
+			if !isDecorativeDivider(opt) {
 				info.ConfigurationOptions = append(info.ConfigurationOptions, opt)
 			}
 		}
 	}
 
 	return info, nil
+}
+
+// isDecorativeDivider reports whether a modinfo configuration_options item is a
+// non-configurable section header or blank spacer (e.g. empty name, no choices,
+// or a single placeholder choice with an empty description such as Legion's "Title" rows).
+func isDecorativeDivider(opt ModConfigOption) bool {
+	if strings.TrimSpace(opt.Name) == "" || len(opt.Options) == 0 {
+		return true
+	}
+	if len(opt.Options) == 1 && strings.TrimSpace(opt.Options[0].Description) == "" {
+		return true
+	}
+	return false
 }
 
 // --- modoverrides.lua ---

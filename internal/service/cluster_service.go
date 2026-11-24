@@ -75,10 +75,15 @@ type ClusterService struct {
 	store  *db.Store
 	fs     *dst.FS
 	driver runtime.Driver
+	modSvc *ModService
 }
 
 func NewClusterService(store *db.Store, fs *dst.FS, driver runtime.Driver) *ClusterService {
 	return &ClusterService{store: store, fs: fs, driver: driver}
+}
+
+func (s *ClusterService) SetModService(modSvc *ModService) {
+	s.modSvc = modSvc
 }
 
 func (s *ClusterService) ListClusters(u *db.User) ([]ClusterSummary, error) {
@@ -622,10 +627,18 @@ func (s *ClusterService) StartShard(ctx context.Context, clusterID, shard string
 	if st != nil && st.DSTArch != "" {
 		arch = st.DSTArch
 	}
-	return s.driver.StartShard(ctx, clusterID, shard, runtime.StartOptions{
+	opts := runtime.StartOptions{
 		AutoRestart: detail.Meta.AutoRestart,
 		Arch:        arch,
-	})
+	}
+	if s.modSvc != nil {
+		modSvc := s.modSvc
+		normShard := strings.ToLower(shard)
+		opts.Prepare = func(prepCtx context.Context, logFn func(level, msg string)) error {
+			return modSvc.EnsureShardModsReady(prepCtx, clusterID, normShard, logFn)
+		}
+	}
+	return s.driver.StartShard(ctx, clusterID, shard, opts)
 }
 
 func (s *ClusterService) StopShard(ctx context.Context, clusterID, shard string) error {

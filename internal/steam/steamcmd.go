@@ -1,7 +1,9 @@
 package steam
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -492,12 +494,7 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 	defer cancel()
 
 	staging := filepath.Join(m.steamCMDDir, "workshop_cache")
-	args := []string{
-		"+force_install_dir", staging,
-		"+login", "anonymous",
-		"+workshop_download_item", DSTGameAppID, workshopID,
-		"+quit",
-	}
+	args := buildWorkshopDownloadArgs(staging, []string{workshopID})
 	m.publish(fmt.Sprintf("[walrus] Downloading Workshop mod %s via SteamCMD...", workshopID))
 	err := m.runWithMissingConfigRetry(func() (bool, error) {
 		return m.execSteamCMD(taskCtx, args)
@@ -514,13 +511,161 @@ func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (s
 		return "", err
 	}
 
-	_ = os.RemoveAll(destDir)
-	if err := copyDir(downloadedPath, destDir); err != nil {
+	extractedArchive, err := installWorkshopModDir(downloadedPath, destDir)
+	if err != nil {
 		m.finishTask(err)
 		return "", err
 	}
+	if extractedArchive != "" {
+		m.publish(fmt.Sprintf("[walrus] Extracted legacy Workshop archive %s for mod %s", filepath.Base(extractedArchive), workshopID))
+	}
 	m.finishTask(nil)
 	return destDir, nil
+}
+
+// DownloadWorkshopMods downloads multiple Workshop items in a single SteamCMD session
+// and installs each into DST's mods/workshop-<id> folder.
+func (m *Manager) DownloadWorkshopMods(ctx context.Context, workshopIDs []string, onProgress func(msg string)) error {
+	cleanIDs := make([]string, 0, len(workshopIDs))
+	seen := make(map[string]struct{}, len(workshopIDs))
+	for _, raw := range workshopIDs {
+		wid := strings.TrimSpace(raw)
+		if wid == "" {
+			continue
+		}
+		if _, dup := seen[wid]; dup {
+			continue
+		}
+		seen[wid] = struct{}{}
+		cleanIDs = append(cleanIDs, wid)
+	}
+	if len(cleanIDs) == 0 {
+		return nil
+	}
+
+	notify := func(msg string) {
+		m.publish(msg)
+		if onProgress != nil {
+			onProgress(msg)
+		}
+	}
+
+	modsRoot := filepath.Join(m.dstServerDir, "mods")
+	if err := os.MkdirAll(modsRoot, 0o755); err != nil {
+		return err
+	}
+
+	if m.runtimeMode == "mock" {
+		notify(fmt.Sprintf("[walrus] [Mock SteamCMD] Downloading %d Workshop mod(s): %s", len(cleanIDs), strings.Join(cleanIDs, ", ")))
+		for _, wid := range cleanIDs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			destDir := filepath.Join(modsRoot, "workshop-"+wid)
+			if err := os.MkdirAll(destDir, 0o755); err != nil {
+				return err
+			}
+			modInfoPath := filepath.Join(destDir, "modinfo.lua")
+			if _, err := os.Stat(modInfoPath); errors.Is(err, os.ErrNotExist) {
+				if err := os.WriteFile(modInfoPath, []byte(mockModInfoLua(wid)), 0o644); err != nil {
+					return err
+				}
+			}
+		}
+		notify(fmt.Sprintf("[walrus] [Mock SteamCMD] %d Workshop mod(s) ready.", len(cleanIDs)))
+		return nil
+	}
+
+	timeout := time.Duration(len(cleanIDs)) * 2 * time.Minute
+	if timeout < defaultModDownloadTimeout {
+		timeout = defaultModDownloadTimeout
+	}
+	if timeout > defaultServerUpdateTimeout {
+		timeout = defaultServerUpdateTimeout
+	}
+	taskCtx, cancel := context.WithTimeout(ctx, timeout)
+
+	m.mu.Lock()
+	if m.taskState == TaskRunning {
+		m.mu.Unlock()
+		cancel()
+		return apperr.New(apperr.CodeSteamCMDBusy, "another SteamCMD operation is currently running")
+	}
+	m.taskState = TaskRunning
+	m.taskKind = "mod_download"
+	m.lastError = ""
+	m.cancelTask = cancel
+	m.mu.Unlock()
+	defer cancel()
+
+	staging := filepath.Join(m.steamCMDDir, "workshop_cache")
+	args := buildWorkshopDownloadArgs(staging, cleanIDs)
+	notify(fmt.Sprintf("[walrus] Downloading %d Workshop mod(s) via SteamCMD: %s", len(cleanIDs), strings.Join(cleanIDs, ", ")))
+
+	cmdErr := m.runWithMissingConfigRetry(func() (bool, error) {
+		return m.execSteamCMD(taskCtx, args)
+	})
+	if ctxErr := taskCtx.Err(); ctxErr != nil {
+		err := fmt.Errorf("workshop batch download aborted: %w", ctxErr)
+		if cmdErr != nil {
+			err = cmdErr
+		}
+		m.finishTask(err)
+		return err
+	}
+
+	// Install every mod that landed in staging so partial successes are preserved on disk.
+	var failedIDs []string
+	var firstInstallErr error
+	installedCount := 0
+	for _, wid := range cleanIDs {
+		downloadedPath := filepath.Join(staging, "steamapps", "workshop", "content", DSTGameAppID, wid)
+		destDir := filepath.Join(modsRoot, "workshop-"+wid)
+		if _, statErr := os.Stat(downloadedPath); statErr != nil {
+			failedIDs = append(failedIDs, wid)
+			continue
+		}
+		extractedArchive, installErr := installWorkshopModDir(downloadedPath, destDir)
+		if installErr != nil {
+			failedIDs = append(failedIDs, wid)
+			if firstInstallErr == nil {
+				firstInstallErr = installErr
+			}
+			continue
+		}
+		installedCount++
+		if extractedArchive != "" {
+			notify(fmt.Sprintf("[walrus] Extracted legacy Workshop archive %s for mod %s", filepath.Base(extractedArchive), wid))
+		}
+	}
+
+	if len(failedIDs) > 0 {
+		detail := fmt.Sprintf("failed to download/install %d Workshop mod(s): %s", len(failedIDs), strings.Join(failedIDs, ", "))
+		if firstInstallErr != nil {
+			detail += fmt.Sprintf(" (%v)", firstInstallErr)
+		} else if cmdErr != nil {
+			detail += fmt.Sprintf(" (%v)", cmdErr)
+		}
+		err := apperr.Newf(apperr.CodeWorkshopDownloadMissing, map[string]any{"workshop_ids": strings.Join(failedIDs, ", ")}, "%s", detail)
+		m.finishTask(err)
+		return err
+	}
+
+	notify(fmt.Sprintf("[walrus] Installed %d Workshop mod(s) into %s", installedCount, modsRoot))
+	m.finishTask(nil)
+	return nil
+}
+
+func buildWorkshopDownloadArgs(staging string, workshopIDs []string) []string {
+	args := make([]string, 0, 5+len(workshopIDs)*3)
+	args = append(args,
+		"+force_install_dir", staging,
+		"+login", "anonymous",
+	)
+	for _, wid := range workshopIDs {
+		args = append(args, "+workshop_download_item", DSTGameAppID, wid)
+	}
+	return append(args, "+quit")
 }
 
 func (m *Manager) runWithMissingConfigRetry(run func() (bool, error)) error {
@@ -663,6 +808,212 @@ func copyDir(src, dst string) error {
 		_, err = io.Copy(out, in)
 		return err
 	})
+}
+
+// installWorkshopModDir installs a SteamCMD-downloaded Workshop item into destDir.
+// Modern UGC items already contain modinfo.lua directly; legacy Workshop items are
+// downloaded by SteamCMD as a single ZIP archive (e.g. "<id>_legacy.bin") which must
+// be extracted with normalized path separators so Linux servers and modinfo.lua parsing work.
+func installWorkshopModDir(downloadedPath, destDir string) (extractedArchive string, err error) {
+	fi, err := os.Stat(downloadedPath)
+	if err != nil {
+		return "", apperr.Newf(apperr.CodeWorkshopDownloadMissing, map[string]any{"path": downloadedPath}, "workshop files not found after download at %s", downloadedPath)
+	}
+
+	var modRoot string
+	if !fi.IsDir() {
+		if !isZipFile(downloadedPath) {
+			return "", apperr.Newf(apperr.CodeWorkshopDownloadMissing, map[string]any{"path": downloadedPath}, "workshop download is neither a mod directory nor a ZIP archive: %s", downloadedPath)
+		}
+		tmpDir, tmpErr := os.MkdirTemp("", "walrus-workshop-extract-*")
+		if tmpErr != nil {
+			return "", tmpErr
+		}
+		defer os.RemoveAll(tmpDir)
+
+		if err := extractZipArchive(downloadedPath, tmpDir); err != nil {
+			return "", err
+		}
+		modRoot = findModRootDir(tmpDir)
+		if modRoot == "" {
+			return "", apperr.New(apperr.CodeModZipMissingModInfo, "workshop archive does not contain modinfo.lua at root or top-level folder")
+		}
+		extractedArchive = downloadedPath
+	} else if root := findModRootDir(downloadedPath); root != "" {
+		modRoot = root
+	} else if archivePath := findLegacyWorkshopArchive(downloadedPath); archivePath != "" {
+		tmpDir, tmpErr := os.MkdirTemp("", "walrus-workshop-extract-*")
+		if tmpErr != nil {
+			return "", tmpErr
+		}
+		defer os.RemoveAll(tmpDir)
+
+		if err := extractZipArchive(archivePath, tmpDir); err != nil {
+			return "", err
+		}
+		modRoot = findModRootDir(tmpDir)
+		if modRoot == "" {
+			return "", apperr.New(apperr.CodeModZipMissingModInfo, "workshop archive does not contain modinfo.lua at root or top-level folder")
+		}
+		extractedArchive = archivePath
+	} else {
+		return "", apperr.Newf(apperr.CodeWorkshopDownloadMissing, map[string]any{"path": downloadedPath}, "modinfo.lua not found in downloaded workshop directory %s", downloadedPath)
+	}
+
+	parentDir := filepath.Dir(destDir)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return "", err
+	}
+	stageDest, err := os.MkdirTemp(parentDir, ".workshop-stage-*")
+	if err != nil {
+		return "", err
+	}
+	stageCleanup := true
+	defer func() {
+		if stageCleanup {
+			_ = os.RemoveAll(stageDest)
+		}
+	}()
+
+	if err := copyDir(modRoot, stageDest); err != nil {
+		return "", err
+	}
+	_ = os.Chmod(stageDest, 0o755)
+	if err := os.RemoveAll(destDir); err != nil {
+		return "", err
+	}
+	if err := os.Rename(stageDest, destDir); err != nil {
+		return "", err
+	}
+	stageCleanup = false
+	return extractedArchive, nil
+}
+
+func findModRootDir(dir string) string {
+	if fi, err := os.Stat(filepath.Join(dir, "modinfo.lua")); err == nil && !fi.IsDir() {
+		return dir
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		cand := filepath.Join(dir, e.Name())
+		if fi, statErr := os.Stat(filepath.Join(cand, "modinfo.lua")); statErr == nil && !fi.IsDir() {
+			return cand
+		}
+	}
+	return ""
+}
+
+func findLegacyWorkshopArchive(dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	var legacyBin, binOrZip, otherZip string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		full := filepath.Join(dir, e.Name())
+		if !isZipFile(full) {
+			continue
+		}
+		lower := strings.ToLower(e.Name())
+		switch {
+		case strings.HasSuffix(lower, "_legacy.bin"):
+			if legacyBin == "" {
+				legacyBin = full
+			}
+		case strings.HasSuffix(lower, ".bin") || strings.HasSuffix(lower, ".zip"):
+			if binOrZip == "" {
+				binOrZip = full
+			}
+		default:
+			if otherZip == "" {
+				otherZip = full
+			}
+		}
+	}
+	if legacyBin != "" {
+		return legacyBin
+	}
+	if binOrZip != "" {
+		return binOrZip
+	}
+	return otherZip
+}
+
+func isZipFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [4]byte
+	if _, err := io.ReadFull(f, hdr[:]); err != nil {
+		return false
+	}
+	return bytes.Equal(hdr[:], []byte{'P', 'K', 0x03, 0x04}) || bytes.Equal(hdr[:], []byte{'P', 'K', 0x05, 0x06})
+}
+
+func extractZipArchive(archivePath, destDir string) error {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return apperr.WrapDetail(apperr.CodeInvalidZipArchive, err, "invalid workshop archive: %v", err)
+	}
+	defer zr.Close()
+
+	cleanRoot := filepath.Clean(destDir)
+	cleanPrefix := cleanRoot + string(os.PathSeparator)
+
+	for _, f := range zr.File {
+		// Legacy DST workshop archives created on Windows often store '\' separators.
+		normName := strings.ReplaceAll(f.Name, "\\", "/")
+		if strings.HasPrefix(normName, "/") {
+			return apperr.Newf(apperr.CodeIllegalZipPath, map[string]any{"path": f.Name}, "illegal path in workshop archive: %s", f.Name)
+		}
+		target := filepath.Clean(filepath.Join(cleanRoot, filepath.FromSlash(normName)))
+		if target != cleanRoot && !strings.HasPrefix(target+string(os.PathSeparator), cleanPrefix) {
+			return apperr.Newf(apperr.CodeIllegalZipPath, map[string]any{"path": f.Name}, "illegal path in workshop archive: %s", f.Name)
+		}
+		if f.FileInfo().IsDir() || strings.HasSuffix(normName, "/") {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := extractZipEntry(f, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func extractZipEntry(f *zip.File, target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, rc)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func mockModInfoLua(workshopID string) string {

@@ -212,6 +212,7 @@ export interface DockerCapability {
   container_name?: string
   current_image?: string
   target_image?: string
+  target_image_pending?: boolean
   unavailable_reason?: 'not_docker' | 'socket_not_mounted' | 'container_not_found' | string
 }
 

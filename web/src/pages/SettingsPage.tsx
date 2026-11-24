@@ -194,6 +194,8 @@ export function SettingsPage() {
       qc.setQueryData(['system-version'], res)
       if (res.info.update_available) {
         toast.success(t('settings.checkUpdateDoneAvailable', { version: res.info.latest_version || 'latest' }))
+      } else if (res.info.docker?.target_image_pending) {
+        toast.info(t('settings.checkUpdateDoneImageBuilding', { version: res.info.latest_version || 'latest' }))
       } else {
         toast.success(t('settings.checkUpdateDoneUpToDate'))
       }
@@ -418,6 +420,11 @@ export function SettingsPage() {
                   <Badge variant="warning">
                     {t('settings.statusUpdateAvailable', { version: versionInfo.latest_version || 'latest' })}
                   </Badge>
+                ) : versionInfo.docker.target_image_pending ? (
+                  <Badge variant="info">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {t('settings.statusImageBuilding', { version: versionInfo.latest_version || 'latest' })}
+                  </Badge>
                 ) : versionInfo.last_checked_at && !versionInfo.last_check_error ? (
                   <Badge variant="success">
                     <CheckCircle2 className="h-3 w-3" />
@@ -452,6 +459,7 @@ export function SettingsPage() {
                   variant={versionInfo.update_available ? 'default' : 'outline'}
                   disabled={
                     upgradeMut.isPending ||
+                    versionInfo.docker.target_image_pending ||
                     upgradePhase === 'pulling' ||
                     upgradePhase === 'restarting' ||
                     upgradePhase === 'reconnecting'
@@ -576,6 +584,26 @@ export function SettingsPage() {
                 )}
               </div>
             )}
+
+            {/* Target Image Still Building Notice */}
+            {versionInfo.docker.target_image_pending &&
+              upgradePhase !== 'pulling' &&
+              upgradePhase !== 'restarting' &&
+              upgradePhase !== 'reconnecting' && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="flex items-start gap-2.5 rounded-lg border border-sky-600/30 bg-sky-500/10 px-3.5 py-2.5 text-sky-950 dark:border-sky-500/35 dark:text-sky-200 leading-relaxed"
+                >
+                  <Loader2 className="h-4 w-4 shrink-0 mt-0.5 animate-spin text-sky-700 dark:text-sky-400" />
+                  <div>
+                    {t('settings.targetImagePendingHint', {
+                      version: versionInfo.latest_version || 'latest',
+                      image: versionInfo.docker.target_image || '',
+                    })}
+                  </div>
+                </div>
+              )}
 
             {/* Live Upgrade Progress / Failure Status */}
             {(upgradePhase === 'pulling' || upgradePhase === 'restarting' || upgradePhase === 'reconnecting') && (

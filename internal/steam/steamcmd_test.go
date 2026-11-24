@@ -1,6 +1,8 @@
 package steam
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"walrus/internal/apperr"
 )
 
 func TestMockServerUpdateNoDeadlockAndPersistsLogs(t *testing.T) {
@@ -110,6 +114,39 @@ func TestBuildServerUpdateArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotBeta, wantBeta) {
 		t.Fatalf("beta no-validate args mismatch:\ngot:  %v\nwant: %v", gotBeta, wantBeta)
+	}
+}
+
+func TestBuildWorkshopDownloadArgsAndMockBatch(t *testing.T) {
+	got := buildWorkshopDownloadArgs("/data/steamcmd/workshop_cache", []string{"1699194522", "1909182187"})
+	want := []string{
+		"+force_install_dir", "/data/steamcmd/workshop_cache",
+		"+login", "anonymous",
+		"+workshop_download_item", DSTGameAppID, "1699194522",
+		"+workshop_download_item", DSTGameAppID, "1909182187",
+		"+quit",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("workshop batch args mismatch:\ngot:  %v\nwant: %v", got, want)
+	}
+
+	tmp := t.TempDir()
+	dstDir := filepath.Join(tmp, "dst-server")
+	mgr := NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+
+	var progress []string
+	if err := mgr.DownloadWorkshopMods(t.Context(), []string{"378160973", "1909182187", "378160973", " "}, func(msg string) {
+		progress = append(progress, msg)
+	}); err != nil {
+		t.Fatalf("DownloadWorkshopMods mock: %v", err)
+	}
+	if len(progress) < 2 {
+		t.Fatalf("expected progress callbacks, got %v", progress)
+	}
+	for _, wid := range []string{"378160973", "1909182187"} {
+		if _, err := os.Stat(filepath.Join(dstDir, "mods", "workshop-"+wid, "modinfo.lua")); err != nil {
+			t.Fatalf("expected modinfo.lua for %s: %v", wid, err)
+		}
 	}
 }
 
@@ -219,6 +256,139 @@ func TestRunWithMissingConfigRetry(t *testing.T) {
 		}
 		if attempts != 2 {
 			t.Fatalf("expected 2 attempts, got %d", attempts)
+		}
+	})
+}
+
+func writeTestZip(t *testing.T, path string, files map[string]string) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create zip entry %s: %v", name, err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatalf("write zip entry %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir zip parent: %v", err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write zip file: %v", err)
+	}
+}
+
+func TestInstallWorkshopModDir(t *testing.T) {
+	t.Run("extracts legacy bin archive with windows backslash paths", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcDir := filepath.Join(tmp, "staging", "2007975851")
+		destDir := filepath.Join(tmp, "mods", "workshop-2007975851")
+
+		writeTestZip(t, filepath.Join(srcDir, "2007975851_legacy.bin"), map[string]string{
+			"modinfo.lua":           `name = "[DST] Legion" version = "6.1.1"`,
+			`anim\agronssword.zip`:  "anim-bytes",
+			`scripts\prefabs\a.lua`: "return {}",
+		})
+
+		archive, err := installWorkshopModDir(srcDir, destDir)
+		if err != nil {
+			t.Fatalf("installWorkshopModDir legacy: %v", err)
+		}
+		if filepath.Base(archive) != "2007975851_legacy.bin" {
+			t.Fatalf("expected archive 2007975851_legacy.bin, got %q", archive)
+		}
+		if _, err := os.Stat(filepath.Join(destDir, "modinfo.lua")); err != nil {
+			t.Fatalf("expected extracted modinfo.lua: %v", err)
+		}
+		if got, err := os.ReadFile(filepath.Join(destDir, "anim", "agronssword.zip")); err != nil || string(got) != "anim-bytes" {
+			t.Fatalf("expected normalized anim/agronssword.zip, got %q err=%v", string(got), err)
+		}
+		if _, err := os.Stat(filepath.Join(destDir, "2007975851_legacy.bin")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected raw legacy .bin not to be copied into destDir, err=%v", err)
+		}
+	})
+
+	t.Run("extracts legacy archive with top-level subfolder", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcDir := filepath.Join(tmp, "staging", "999999")
+		destDir := filepath.Join(tmp, "mods", "workshop-999999")
+
+		writeTestZip(t, filepath.Join(srcDir, "999999_legacy.bin"), map[string]string{
+			"my_mod/modinfo.lua": `name = "Wrapped Mod"`,
+			"my_mod/modmain.lua": `-- main`,
+		})
+
+		if _, err := installWorkshopModDir(srcDir, destDir); err != nil {
+			t.Fatalf("installWorkshopModDir wrapped: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(destDir, "modinfo.lua")); err != nil {
+			t.Fatalf("expected unwrapped modinfo.lua at destDir root: %v", err)
+		}
+	})
+
+	t.Run("copies standard unpacked UGC mod directly", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcDir := filepath.Join(tmp, "staging", "1991746508")
+		destDir := filepath.Join(tmp, "mods", "workshop-1991746508")
+		if err := os.MkdirAll(srcDir, 0o755); err != nil {
+			t.Fatalf("mkdir src: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "modinfo.lua"), []byte(`name = "Myth"`), 0o644); err != nil {
+			t.Fatalf("write modinfo: %v", err)
+		}
+
+		archive, err := installWorkshopModDir(srcDir, destDir)
+		if err != nil {
+			t.Fatalf("installWorkshopModDir unpacked: %v", err)
+		}
+		if archive != "" {
+			t.Fatalf("expected empty archive path for unpacked UGC mod, got %q", archive)
+		}
+		if _, err := os.Stat(filepath.Join(destDir, "modinfo.lua")); err != nil {
+			t.Fatalf("expected copied modinfo.lua: %v", err)
+		}
+	})
+
+	t.Run("errors when directory has neither modinfo nor archive", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcDir := filepath.Join(tmp, "staging", "empty")
+		destDir := filepath.Join(tmp, "mods", "workshop-empty")
+		if err := os.MkdirAll(srcDir, 0o755); err != nil {
+			t.Fatalf("mkdir empty: %v", err)
+		}
+		_, err := installWorkshopModDir(srcDir, destDir)
+		code, _, _ := apperr.Extract(err, "")
+		if code != apperr.CodeWorkshopDownloadMissing {
+			t.Fatalf("expected %s, got code=%q err=%v", apperr.CodeWorkshopDownloadMissing, code, err)
+		}
+	})
+
+	t.Run("rejects archive without modinfo and zip-slip entries", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcNoInfo := filepath.Join(tmp, "staging", "noinfo")
+		writeTestZip(t, filepath.Join(srcNoInfo, "noinfo_legacy.bin"), map[string]string{
+			"readme.txt": "no modinfo here",
+		})
+		_, err := installWorkshopModDir(srcNoInfo, filepath.Join(tmp, "mods", "workshop-noinfo"))
+		code, _, _ := apperr.Extract(err, "")
+		if code != apperr.CodeModZipMissingModInfo {
+			t.Fatalf("expected %s, got code=%q err=%v", apperr.CodeModZipMissingModInfo, code, err)
+		}
+
+		srcSlip := filepath.Join(tmp, "staging", "slip")
+		writeTestZip(t, filepath.Join(srcSlip, "slip_legacy.bin"), map[string]string{
+			"../escape.lua": "evil",
+		})
+		_, err = installWorkshopModDir(srcSlip, filepath.Join(tmp, "mods", "workshop-slip"))
+		code, _, _ = apperr.Extract(err, "")
+		if code != apperr.CodeIllegalZipPath {
+			t.Fatalf("expected %s, got code=%q err=%v", apperr.CodeIllegalZipPath, code, err)
 		}
 	})
 }

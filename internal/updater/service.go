@@ -19,14 +19,15 @@ import (
 
 // DockerCapability describes whether the running Walrus instance can self-upgrade via Docker Engine API.
 type DockerCapability struct {
-	InDocker          bool   `json:"in_docker"`
-	SocketAvailable   bool   `json:"socket_available"`
-	CanSelfUpgrade    bool   `json:"can_self_upgrade"`
-	ContainerID       string `json:"container_id,omitempty"`
-	ContainerName     string `json:"container_name,omitempty"`
-	CurrentImage      string `json:"current_image,omitempty"`
-	TargetImage       string `json:"target_image,omitempty"`
-	UnavailableReason string `json:"unavailable_reason,omitempty"` // not_docker | socket_not_mounted | container_not_found
+	InDocker           bool   `json:"in_docker"`
+	SocketAvailable    bool   `json:"socket_available"`
+	CanSelfUpgrade     bool   `json:"can_self_upgrade"`
+	ContainerID        string `json:"container_id,omitempty"`
+	ContainerName      string `json:"container_name,omitempty"`
+	CurrentImage       string `json:"current_image,omitempty"`
+	TargetImage        string `json:"target_image,omitempty"`
+	TargetImagePending bool   `json:"target_image_pending,omitempty"`
+	UnavailableReason  string `json:"unavailable_reason,omitempty"` // not_docker | socket_not_mounted | container_not_found
 }
 
 // UpgradeState describes the live status of an in-progress or recently attempted self-upgrade.
@@ -76,16 +77,17 @@ type Service struct {
 	currentInfo    func() version.Info
 
 	// Cached remote check result
-	latestVersion   string
-	updateAvailable bool
-	source          string
-	releaseURL      string
-	releaseNotes    string
-	publishedAt     string
-	localDigest     string
-	remoteDigest    string
-	lastCheckedAt   string
-	lastCheckError  string
+	latestVersion      string
+	updateAvailable    bool
+	targetImagePending bool
+	source             string
+	releaseURL         string
+	releaseNotes       string
+	publishedAt        string
+	localDigest        string
+	remoteDigest       string
+	lastCheckedAt      string
+	lastCheckError     string
 
 	// Live upgrade progress
 	upgrade UpgradeState
@@ -143,14 +145,15 @@ func (s *Service) CheckUpdate(ctx context.Context) (VersionStatus, error) {
 	cancelProbe()
 
 	var (
-		latestVer   string
-		source      string
-		releaseURL  string
-		releaseNote string
-		publishedAt string
-		remoteDig   string
-		updateAvail bool
-		errs        []string
+		latestVer          string
+		source             string
+		releaseURL         string
+		releaseNote        string
+		publishedAt        string
+		remoteDig          string
+		updateAvail        bool
+		targetImagePending bool
+		errs               []string
 	)
 
 	// 1. Primary source: GitHub Releases (/releases/latest)
@@ -179,6 +182,22 @@ func (s *Service) CheckUpdate(ctx context.Context) (VersionStatus, error) {
 	if latestVer != "" {
 		if cmp, ok := version.CompareSemver(info.Version, latestVer); ok {
 			updateAvail = cmp < 0
+		}
+	}
+
+	// 2.5. When running in Docker and a newer GitHub Release/Tag was found, verify the target
+	// GHCR image is already published so we do not trigger 404 pulls while CI is still building.
+	if updateAvail && capInfo.InDocker && (source == "github_release" || source == "github_tag") {
+		targetRef := s.computeTargetImage(capInfo, source, latestVer)
+		targetRepo, targetTag := SplitImageRef(targetRef)
+		if strings.HasPrefix(strings.ToLower(targetRepo), "ghcr.io/") {
+			dig, readyErr := s.fetchGHCRDigestWithTagFallback(ctx, targetRepo, targetTag)
+			if readyErr == nil && dig != "" {
+				remoteDig = dig
+			} else if errors.Is(readyErr, errGHCRManifestNotFound) {
+				targetImagePending = true
+				updateAvail = false
+			}
 		}
 	}
 
@@ -221,9 +240,11 @@ func (s *Service) CheckUpdate(ctx context.Context) (VersionStatus, error) {
 		s.publishedAt = publishedAt
 		s.remoteDigest = remoteDig
 		s.updateAvailable = updateAvail
+		s.targetImagePending = targetImagePending
 		s.lastCheckError = ""
 	} else {
 		s.source = "none"
+		s.targetImagePending = false
 		s.lastCheckError = strings.Join(errs, "; ")
 	}
 	st := s.buildStatusLocked(capInfo)
@@ -392,13 +413,17 @@ func (s *Service) pullWithFallback(ctx context.Context, targetImage string, onPr
 	if err == nil {
 		return targetImage, nil
 	}
+	isNotFound := strings.Contains(strings.ToLower(err.Error()), "not found")
 	// If tag has leading "v" (e.g. :v0.2.0) and registry returned not found, also try :0.2.0.
 	repo, tag := SplitImageRef(targetImage)
-	if strings.HasPrefix(tag, "v") && version.IsSemver(tag) && strings.Contains(strings.ToLower(err.Error()), "not found") {
+	if strings.HasPrefix(tag, "v") && version.IsSemver(tag) && isNotFound {
 		alt := repo + ":" + strings.TrimPrefix(tag, "v")
 		if altErr := s.dockerClient.PullImage(ctx, alt, onProgress); altErr == nil {
 			return alt, nil
 		}
+	}
+	if isNotFound {
+		return "", fmt.Errorf("image %s is not yet published in registry (CI build may still be in progress; retry in 1-2 minutes): %w", targetImage, err)
 	}
 	return "", err
 }
@@ -466,24 +491,27 @@ func (s *Service) resolveImageRepo(currentImage string) string {
 }
 
 func (s *Service) computeTargetImageLocked(capInfo DockerCapability) string {
+	return s.computeTargetImage(capInfo, s.source, s.latestVersion)
+}
+
+func (s *Service) computeTargetImage(capInfo DockerCapability, source, latestVersion string) string {
 	repo := s.resolveImageRepo(capInfo.CurrentImage)
 	_, currentTag := SplitImageRef(capInfo.CurrentImage)
 	if currentTag == "" {
 		currentTag = "latest"
 	}
-	// If we discovered a semver release/tag:
-	if (s.source == "github_release" || s.source == "github_tag") && version.IsSemver(s.latestVersion) {
-		// If currently running :latest or :main, pull :latest (keeps compose tag aligned) unless pinned to a semver tag.
+	// If we discovered a semver release/tag, target the explicit versioned image tag.
+	if (source == "github_release" || source == "github_tag") && version.IsSemver(latestVersion) {
 		if currentTag == "latest" || currentTag == "main" {
-			return repo + ":" + s.latestVersion
+			return repo + ":" + latestVersion
 		}
 		if strings.HasPrefix(currentTag, "v") {
-			if strings.HasPrefix(s.latestVersion, "v") {
-				return repo + ":" + s.latestVersion
+			if strings.HasPrefix(latestVersion, "v") {
+				return repo + ":" + latestVersion
 			}
-			return repo + ":v" + s.latestVersion
+			return repo + ":v" + latestVersion
 		}
-		return repo + ":" + strings.TrimPrefix(s.latestVersion, "v")
+		return repo + ":" + strings.TrimPrefix(latestVersion, "v")
 	}
 	return repo + ":" + currentTag
 }
@@ -491,6 +519,7 @@ func (s *Service) computeTargetImageLocked(capInfo DockerCapability) string {
 func (s *Service) buildStatusLocked(capInfo DockerCapability) VersionStatus {
 	info := s.currentInfo()
 	capInfo.TargetImage = s.computeTargetImageLocked(capInfo)
+	capInfo.TargetImagePending = s.targetImagePending
 	return VersionStatus{
 		CurrentVersion:  info.Version,
 		Commit:          info.Commit,
@@ -594,6 +623,19 @@ func (s *Service) fetchGitHubLatestSemverTag(ctx context.Context) (string, error
 	return best, nil
 }
 
+var errGHCRManifestNotFound = errors.New("ghcr manifest not found")
+
+func (s *Service) fetchGHCRDigestWithTagFallback(ctx context.Context, imageRepo, tag string) (string, error) {
+	dig, err := s.fetchGHCRDigest(ctx, imageRepo, tag)
+	if err == nil {
+		return dig, nil
+	}
+	if errors.Is(err, errGHCRManifestNotFound) && strings.HasPrefix(tag, "v") && version.IsSemver(tag) {
+		return s.fetchGHCRDigest(ctx, imageRepo, strings.TrimPrefix(tag, "v"))
+	}
+	return "", err
+}
+
 func (s *Service) fetchGHCRDigest(ctx context.Context, imageRepo, tag string) (string, error) {
 	// Extract owner/repo from ghcr.io/owner/repo
 	repoPath := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(imageRepo)), "ghcr.io/")
@@ -649,6 +691,9 @@ func (s *Service) fetchGHCRDigest(ctx context.Context, imageRepo, tag string) (s
 		return "", err
 	}
 	defer mResp.Body.Close()
+	if mResp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("%w (HTTP 404)", errGHCRManifestNotFound)
+	}
 	if mResp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ghcr manifest HTTP %d", mResp.StatusCode)
 	}
