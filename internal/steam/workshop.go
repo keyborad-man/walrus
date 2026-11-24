@@ -113,21 +113,35 @@ func ExtractWorkshopID(input string) (string, error) {
 	return "", apperr.Newf(apperr.CodeInvalidWorkshopID, map[string]any{"input": input}, "could not extract a valid Steam Workshop ID from %q", input)
 }
 
+// SetDetailsEndpoint overrides the Steam GetPublishedFileDetails URL (primarily for testing).
+func (c *WorkshopClient) SetDetailsEndpoint(endpoint string) {
+	c.mu.Lock()
+	c.detailsEndpoint = strings.TrimSpace(endpoint)
+	c.mu.Unlock()
+}
+
 // GetPublishedFileDetails fetches metadata for one or more Workshop IDs without requiring an API key.
 func (c *WorkshopClient) GetPublishedFileDetails(ctx context.Context, ids []string) ([]WorkshopItem, error) {
 	if len(ids) == 0 {
 		return []WorkshopItem{}, nil
 	}
+
+	c.mu.Lock()
+	detailsURL := c.detailsEndpoint
+	c.mu.Unlock()
+	if detailsURL == "" {
+		detailsURL = defaultPublishedFileDetailsURL
+	}
+	if c.runtimeMode == "mock" && detailsURL == defaultPublishedFileDetailsURL {
+		return mockFallbackDetails(ids), nil
+	}
+
 	form := url.Values{}
 	form.Set("itemcount", strconv.Itoa(len(ids)))
 	for i, id := range ids {
 		form.Set(fmt.Sprintf("publishedfileids[%d]", i), id)
 	}
 
-	detailsURL := c.detailsEndpoint
-	if detailsURL == "" {
-		detailsURL = defaultPublishedFileDetailsURL
-	}
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,

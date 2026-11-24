@@ -36,7 +36,7 @@ export function QueryErrorCard({ error, onRetry, compact = false }: QueryErrorCa
     <Card className="border-red-600/35 bg-red-600/5 dark:border-red-500/35">
       <CardContent
         role="alert"
-        className="py-10 px-6 flex flex-col items-center justify-center text-center gap-3"
+        className="py-10 px-6 sm:py-10 sm:px-6 flex flex-col items-center justify-center text-center gap-3"
       >
         <AlertTriangle className="h-7 w-7 text-red-700 dark:text-red-400" />
         <div className="space-y-1 max-w-md">

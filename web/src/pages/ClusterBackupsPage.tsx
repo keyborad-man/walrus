@@ -317,7 +317,7 @@ export function ClusterBackupsPage() {
           {backupsIsError && <QueryErrorCard error={backupsError} onRetry={() => void refetchBackups()} compact />}
           {canOperate && (
             <Card>
-              <CardContent className="p-4">
+              <CardContent className="p-4 sm:p-5">
                 <form onSubmit={handleCreate} className="flex flex-col sm:flex-row gap-3">
                   <Input
                     value={note}

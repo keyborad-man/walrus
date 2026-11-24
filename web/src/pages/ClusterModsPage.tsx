@@ -445,7 +445,7 @@ export function ClusterModsPage() {
         <div id="cluster-mods-panel-configured" role="tabpanel" aria-labelledby="cluster-mods-tab-configured" className="space-y-4">
           {canOperate && (
             <Card>
-              <CardContent className="p-4">
+              <CardContent className="p-4 sm:p-5">
                 <form onSubmit={handleQuickAdd} className="space-y-3">
                   <div className="flex flex-col sm:flex-row gap-2">
                     <Input
@@ -505,7 +505,7 @@ export function ClusterModsPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {mods.map((m) => (
                 <Card key={m.mod_id} interactive={m.enabled} className={cn(!m.enabled && 'border-dashed bg-muted/40')}>
-                  <CardContent className="p-4 space-y-3">
+                  <CardContent className="p-4 sm:p-5 space-y-3">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-start gap-3 min-w-0">
                         <ModThumbnail src={m.preview_url} alt={m.name} />
@@ -672,7 +672,7 @@ export function ClusterModsPage() {
                   const added = installedIds.has(item.mod_id)
                   return (
                     <Card key={item.workshop_id} className="flex flex-col">
-                      <CardContent className="p-4 flex-1 flex flex-col justify-between gap-3">
+                      <CardContent className="p-4 sm:p-5 flex-1 flex flex-col justify-between gap-3">
                         <div className="space-y-3">
                           <div className="flex items-start gap-3">
                             <ModThumbnail src={item.preview_url} alt={item.title} />

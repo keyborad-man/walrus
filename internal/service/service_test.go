@@ -2,8 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -359,4 +363,138 @@ func TestStartShardAbortsWhenEnabledLocalModMissing(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 	}
 	t.Fatalf("expected shard to abort into crashed state when enabled local mod is missing, got %+v", driver.GetShardStatus("missing_local", "master"))
+}
+
+func TestGetClusterModsAndRedownloadBackfillPreviewURL(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if err := r.ParseForm(); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var details []map[string]any
+		for k, vals := range r.PostForm {
+			if len(k) > 16 && k[:16] == "publishedfileids" && len(vals) > 0 {
+				id := vals[0]
+				if id == "999999999" {
+					// Simulate unavailable/deleted workshop item with no preview.
+					details = append(details, map[string]any{
+						"publishedfileid": id,
+						"result":          9,
+					})
+					continue
+				}
+				details = append(details, map[string]any{
+					"publishedfileid": id,
+					"result":          1,
+					"title":           "Steam English Title " + id,
+					"description":     "Steam Description " + id,
+					"preview_url":     "https://steam.example/preview/" + id + ".jpg",
+					"time_updated":    1700000000,
+				})
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"publishedfiledetails": details,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	localModsDir := filepath.Join(tmp, "local-mods")
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	workshop := steam.NewWorkshopClient("linux")
+	workshop.SetDetailsEndpoint(srv.URL)
+	modSvc := NewModService(dstDir, localModsDir, store, fs, steamMgr, workshop)
+	clusterSvc := NewClusterService(store, fs, driver)
+
+	if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:   "preview_world",
+		ClusterName: "Preview World",
+		GameMode:    "endless",
+	}); err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+
+	// Stage a downloaded mod with localized Chinese modinfo.lua but NO cached preview_url.
+	modDir := filepath.Join(dstDir, "mods", "workshop-1185229307")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatalf("mkdir mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "modinfo.lua"), []byte(`
+name = "史诗血量条"
+author = "author"
+version = "104"
+description = "本地描述"
+`), 0o644); err != nil {
+		t.Fatalf("write modinfo: %v", err)
+	}
+
+	if err := fs.WriteModOverrides("preview_world", "master", `return {
+  ["workshop-1185229307"] = { enabled = true, configuration_options = {} },
+  ["workshop-999999999"] = { enabled = true, configuration_options = {} },
+}`); err != nil {
+		t.Fatalf("write modoverrides: %v", err)
+	}
+
+	// 1. First GetClusterMods call should batch-fetch missing preview URLs and persist them.
+	res, err := modSvc.GetClusterMods(context.Background(), "preview_world", "master", "zh-CN")
+	if err != nil {
+		t.Fatalf("get cluster mods: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("expected 1 Steam batch fetch, got %d", hits.Load())
+	}
+	var gotEpic *ClusterModItem
+	for i := range res.Mods {
+		if res.Mods[i].ModID == "workshop-1185229307" {
+			gotEpic = &res.Mods[i]
+		}
+	}
+	if gotEpic == nil {
+		t.Fatal("missing workshop-1185229307 in response")
+	}
+	if gotEpic.PreviewURL != "https://steam.example/preview/1185229307.jpg" {
+		t.Fatalf("expected backfilled preview_url, got %q", gotEpic.PreviewURL)
+	}
+	if gotEpic.Name != "史诗血量条" {
+		t.Fatalf("expected localized modinfo name preserved, got %q", gotEpic.Name)
+	}
+	cache, err := store.GetModCache("workshop-1185229307")
+	if err != nil || cache.PreviewURL != "https://steam.example/preview/1185229307.jpg" {
+		t.Fatalf("expected preview_url persisted in mod_cache, got %+v err=%v", cache, err)
+	}
+
+	// 2. Second GetClusterMods call should hit neither cached mod nor cooled-down missing mod.
+	res2, err := modSvc.GetClusterMods(context.Background(), "preview_world", "master", "zh-CN")
+	if err != nil {
+		t.Fatalf("second get cluster mods: %v", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("expected no additional Steam fetch when cached/cooled down, got %d", hits.Load())
+	}
+	if res2.Mods[0].PreviewURL != "https://steam.example/preview/1185229307.jpg" {
+		t.Fatalf("expected cached preview_url on second load, got %q", res2.Mods[0].PreviewURL)
+	}
+
+	// 3. RedownloadWorkshopMod should also populate preview_url when missing.
+	if err := modSvc.RedownloadWorkshopMod(context.Background(), "workshop-378160973", "zh-CN"); err != nil {
+		t.Fatalf("redownload workshop mod: %v", err)
+	}
+	cache2, err := store.GetModCache("workshop-378160973")
+	if err != nil || cache2.PreviewURL != "https://steam.example/preview/378160973.jpg" {
+		t.Fatalf("expected redownload to populate preview_url, got %+v err=%v", cache2, err)
+	}
 }

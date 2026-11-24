@@ -111,7 +111,7 @@ func (s *Server) handleGetClusterMods(c *gin.Context) {
 	id := c.Param("id")
 	shard := c.DefaultQuery("shard", "master")
 	locale := c.DefaultQuery("locale", "zh-CN")
-	res, err := s.modSvc.GetClusterMods(id, shard, locale)
+	res, err := s.modSvc.GetClusterMods(c.Request.Context(), id, shard, locale)
 	if err != nil {
 		respondError(c, http.StatusBadRequest, err)
 		return

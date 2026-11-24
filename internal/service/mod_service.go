@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"walrus/internal/apperr"
 	"walrus/internal/db"
@@ -42,25 +44,34 @@ type ClusterModsResponse struct {
 	Mods           []ClusterModItem `json:"mods"`
 }
 
+const (
+	previewFetchTimeout   = 5 * time.Second
+	previewRetryCooldown  = 5 * time.Minute
+	previewBatchChunkSize = 50
+)
+
 type ModService struct {
-	dstServerDir string
-	localModsDir string
-	store        *db.Store
-	fs           *dst.FS
-	steamMgr     *steam.Manager
-	workshop     *steam.WorkshopClient
-	prepareSem   chan struct{}
+	dstServerDir      string
+	localModsDir      string
+	store             *db.Store
+	fs                *dst.FS
+	steamMgr          *steam.Manager
+	workshop          *steam.WorkshopClient
+	prepareSem        chan struct{}
+	previewRetryMu    sync.Mutex
+	previewRetryAfter map[string]time.Time
 }
 
 func NewModService(dstServerDir, localModsDir string, store *db.Store, fs *dst.FS, steamMgr *steam.Manager, workshop *steam.WorkshopClient) *ModService {
 	return &ModService{
-		dstServerDir: dstServerDir,
-		localModsDir: localModsDir,
-		store:        store,
-		fs:           fs,
-		steamMgr:     steamMgr,
-		workshop:     workshop,
-		prepareSem:   make(chan struct{}, 1),
+		dstServerDir:      dstServerDir,
+		localModsDir:      localModsDir,
+		store:             store,
+		fs:                fs,
+		steamMgr:          steamMgr,
+		workshop:          workshop,
+		prepareSem:        make(chan struct{}, 1),
+		previewRetryAfter: make(map[string]time.Time),
 	}
 }
 
@@ -156,25 +167,32 @@ func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard 
 		return err
 	}
 
-	// Best-effort refresh cached metadata for newly downloaded mods.
+	// Best-effort refresh cached metadata (including Steam preview icons) for newly downloaded mods.
+	detailMap := s.fetchWorkshopDetails(ctx, missingWorkshopIDs)
 	for _, wid := range missingWorkshopIDs {
 		modID := "workshop-" + wid
 		_, info, cache, _ := s.inspectMod(modID, "zh-CN")
-		if info == nil {
+		d, hasDetail := detailMap[wid]
+		if info == nil && !hasDetail {
 			continue
 		}
 		if cache == nil {
 			cache = &db.ModCache{ModID: modID, WorkshopID: wid}
 		}
-		if info.Name != "" {
-			cache.Name = info.Name
+		if hasDetail {
+			mergeWorkshopDetailIntoCache(cache, d, info == nil)
 		}
-		cache.Author = info.Author
-		cache.Version = info.Version
-		if info.Description != "" && cache.Description == "" {
-			cache.Description = info.Description
+		if info != nil {
+			if info.Name != "" {
+				cache.Name = info.Name
+			}
+			cache.Author = info.Author
+			cache.Version = info.Version
+			if info.Description != "" && cache.Description == "" {
+				cache.Description = info.Description
+			}
+			cache.ClientOnly = info.ClientOnlyMod
 		}
-		cache.ClientOnly = info.ClientOnlyMod
 		_ = s.store.UpsertModCache(cache)
 	}
 	_ = s.SyncDedicatedServerModsSetup()
@@ -212,7 +230,137 @@ func (s *ModService) inspectMod(modID, locale string) (downloaded bool, info *lu
 	return downloaded, parsed, cache, nil
 }
 
-func (s *ModService) GetClusterMods(clusterID, shard, locale string) (*ClusterModsResponse, error) {
+func (s *ModService) fetchWorkshopDetails(ctx context.Context, workshopIDs []string) map[string]steam.WorkshopItem {
+	if s.workshop == nil || len(workshopIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(workshopIDs))
+	unique := make([]string, 0, len(workshopIDs))
+	for _, wid := range workshopIDs {
+		wid = strings.TrimSpace(wid)
+		if wid == "" {
+			continue
+		}
+		if _, ok := seen[wid]; ok {
+			continue
+		}
+		seen[wid] = struct{}{}
+		unique = append(unique, wid)
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, previewFetchTimeout)
+	defer cancel()
+
+	detailMap := make(map[string]steam.WorkshopItem, len(unique))
+	for start := 0; start < len(unique); start += previewBatchChunkSize {
+		end := start + previewBatchChunkSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		details, err := s.workshop.GetPublishedFileDetails(reqCtx, unique[start:end])
+		if err != nil {
+			continue
+		}
+		for _, d := range details {
+			if d.WorkshopID != "" {
+				detailMap[d.WorkshopID] = d
+			}
+		}
+	}
+	return detailMap
+}
+
+func mergeWorkshopDetailIntoCache(cache *db.ModCache, d steam.WorkshopItem, useSteamClientOnly bool) {
+	if d.PreviewURL != "" {
+		cache.PreviewURL = d.PreviewURL
+	}
+	if cache.Name == "" && d.Title != "" {
+		cache.Name = d.Title
+	}
+	if cache.Description == "" && d.Description != "" {
+		cache.Description = d.Description
+	}
+	if d.TimeUpdated > 0 {
+		cache.TimeUpdated = d.TimeUpdated
+	}
+	if len(d.Tags) > 0 && cache.ServerTags == "" {
+		cache.ServerTags = strings.Join(d.Tags, ",")
+	}
+	if useSteamClientOnly {
+		cache.ClientOnly = d.IsClientOnly
+	}
+}
+
+func (s *ModService) backfillClusterModPreviews(ctx context.Context, items []ClusterModItem) {
+	if s.workshop == nil || len(items) == 0 {
+		return
+	}
+	now := time.Now()
+	var missingIdx []int
+	var missingIDs []string
+
+	s.previewRetryMu.Lock()
+	for i := range items {
+		it := &items[i]
+		if it.IsLocal || it.WorkshopID == "" || it.PreviewURL != "" {
+			continue
+		}
+		if retryAt, ok := s.previewRetryAfter[it.WorkshopID]; ok && now.Before(retryAt) {
+			continue
+		}
+		missingIdx = append(missingIdx, i)
+		missingIDs = append(missingIDs, it.WorkshopID)
+	}
+	s.previewRetryMu.Unlock()
+
+	if len(missingIDs) == 0 {
+		return
+	}
+
+	detailMap := s.fetchWorkshopDetails(ctx, missingIDs)
+	retryUntil := time.Now().Add(previewRetryCooldown)
+
+	s.previewRetryMu.Lock()
+	defer s.previewRetryMu.Unlock()
+
+	for _, idx := range missingIdx {
+		it := &items[idx]
+		d, ok := detailMap[it.WorkshopID]
+		if !ok || d.PreviewURL == "" {
+			s.previewRetryAfter[it.WorkshopID] = retryUntil
+			continue
+		}
+		delete(s.previewRetryAfter, it.WorkshopID)
+
+		it.PreviewURL = d.PreviewURL
+		if it.Name == it.ModID && d.Title != "" {
+			it.Name = d.Title
+		}
+		if it.Description == "" && d.Description != "" {
+			it.Description = d.Description
+		}
+
+		cache, _ := s.store.GetModCache(it.ModID)
+		if cache == nil {
+			cache = &db.ModCache{
+				ModID:       it.ModID,
+				WorkshopID:  it.WorkshopID,
+				Name:        it.Name,
+				Author:      it.Author,
+				Version:     it.Version,
+				Description: it.Description,
+				ClientOnly:  it.ClientOnly,
+			}
+		}
+		mergeWorkshopDetailIntoCache(cache, d, !it.Downloaded)
+		_ = s.store.UpsertModCache(cache)
+	}
+}
+
+func (s *ModService) GetClusterMods(ctx context.Context, clusterID, shard, locale string) (*ClusterModsResponse, error) {
 	if !s.fs.ClusterExists(clusterID) {
 		return nil, db.ErrNotFound
 	}
@@ -291,6 +439,8 @@ func (s *ModService) GetClusterMods(clusterID, shard, locale string) (*ClusterMo
 		}
 		items = append(items, item)
 	}
+
+	s.backfillClusterModPreviews(ctx, items)
 
 	return &ClusterModsResponse{
 		Shard:          shard,
@@ -543,6 +693,13 @@ func (s *ModService) RedownloadWorkshopMod(ctx context.Context, modID, locale st
 		if cache == nil {
 			cache = &db.ModCache{ModID: modID, WorkshopID: wid}
 		}
+		if cache.PreviewURL == "" {
+			if detailMap := s.fetchWorkshopDetails(ctx, []string{wid}); detailMap != nil {
+				if d, ok := detailMap[wid]; ok {
+					mergeWorkshopDetailIntoCache(cache, d, false)
+				}
+			}
+		}
 		if info.Name != "" {
 			cache.Name = info.Name
 		}
@@ -750,7 +907,13 @@ func (s *ModService) SearchWorkshop(ctx context.Context, query string, page int)
 
 // SetProxy updates the outbound network proxy used by the Workshop client.
 func (s *ModService) SetProxy(proxyURL string) error {
-	return s.workshop.SetProxy(proxyURL)
+	if err := s.workshop.SetProxy(proxyURL); err != nil {
+		return err
+	}
+	s.previewRetryMu.Lock()
+	s.previewRetryAfter = make(map[string]time.Time)
+	s.previewRetryMu.Unlock()
+	return nil
 }
 
 func copyDirSimple(src, dstDir string) error {
