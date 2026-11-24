@@ -590,6 +590,21 @@ func (s *ClusterService) ensureTokenReady(clusterID string) error {
 	return apperr.New(apperr.CodeClusterTokenMissing, "cluster_token.txt is empty and no global default Klei token is configured")
 }
 
+func (s *ClusterService) ensureLevelDataReady(clusterID, shard string) {
+	if !s.fs.HasLevelData(clusterID, shard) {
+		return
+	}
+	raw, err := s.fs.ReadLevelData(clusterID, shard)
+	if err != nil {
+		return
+	}
+	patched, changed, err := lua.EnsureLevelDataDefaults(raw, shard)
+	if err != nil || !changed {
+		return
+	}
+	_ = s.fs.WriteLevelData(clusterID, shard, patched)
+}
+
 func (s *ClusterService) StartShard(ctx context.Context, clusterID, shard string) error {
 	detail, err := s.GetCluster(clusterID)
 	if err != nil {
@@ -601,6 +616,7 @@ func (s *ClusterService) StartShard(ctx context.Context, clusterID, shard string
 	if err := s.ensureTokenReady(clusterID); err != nil {
 		return err
 	}
+	s.ensureLevelDataReady(clusterID, shard)
 	st, _ := s.store.GetSystemSettings(false)
 	arch := "64"
 	if st != nil && st.DSTArch != "" {

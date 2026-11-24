@@ -347,6 +347,14 @@ func (f *FS) WriteClusterToken(clusterID, token string) error {
 	return WriteFileAtomic(filepath.Join(dir, "cluster_token.txt"), []byte(strings.TrimSpace(token)+"\n"), 0o600)
 }
 
+func (f *FS) HasLevelData(clusterID, shard string) bool {
+	dir, err := f.ShardDir(clusterID, shard)
+	if err != nil {
+		return false
+	}
+	return exists(filepath.Join(dir, "leveldataoverride.lua"))
+}
+
 func (f *FS) ReadLevelData(clusterID, shard string) (string, error) {
 	dir, err := f.ShardDir(clusterID, shard)
 	if err != nil {

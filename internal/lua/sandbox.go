@@ -353,6 +353,100 @@ func PatchLevelOverrides(src string, overrides map[string]any, replaceAllOverrid
 	return sb.String(), nil
 }
 
+// EnsureLevelDataDefaults backfills mandatory DST location worldgen fields (from scripts/map/locations.lua)
+// that are missing from a forest or cave leveldataoverride.lua, without overwriting any existing keys
+// or modifying custom/modded locations.
+func EnsureLevelDataDefaults(src, shard string) (string, bool, error) {
+	val, err := evalReturnTable(src)
+	if err != nil {
+		return "", false, apperr.WrapDetail(apperr.CodeLuaParseFailed, err, "parse leveldataoverride.lua: %v", err)
+	}
+	root, ok := val.(map[string]any)
+	if !ok {
+		return "", false, apperr.New(apperr.CodeLevelDataMustBeTable, "leveldataoverride.lua must return a Lua table")
+	}
+
+	loc, _ := root["location"].(string)
+	loc = strings.ToLower(strings.TrimSpace(loc))
+	if loc == "" {
+		if strings.ToLower(strings.TrimSpace(shard)) == "caves" {
+			loc = "cave"
+		} else {
+			loc = "forest"
+		}
+	}
+
+	var requiredOverrides map[string]any
+	switch loc {
+	case "forest":
+		requiredOverrides = map[string]any{
+			"has_ocean":                          true,
+			"keep_disconnected_tiles":            true,
+			"layout_mode":                        "LinkNodesByKeys",
+			"no_joining_islands":                 true,
+			"no_wormholes_to_disconnected_tiles": true,
+			"roads":                              "default",
+			"season_start":                       "default",
+			"start_location":                     "default",
+			"task_set":                           "default",
+			"world_size":                         "default",
+			"wormhole_prefab":                    "wormhole",
+		}
+	case "cave":
+		requiredOverrides = map[string]any{
+			"layout_mode":     "RestrictNodesByKey",
+			"roads":           "never",
+			"season_start":    "default",
+			"start_location":  "caves",
+			"task_set":        "cave_default",
+			"world_size":      "default",
+			"wormhole_prefab": "tentacle_pillar",
+		}
+	default:
+		return src, false, nil
+	}
+
+	changed := false
+	if existingLoc, _ := root["location"].(string); strings.TrimSpace(existingLoc) == "" {
+		root["location"] = loc
+		changed = true
+	}
+
+	ov, ok := root["overrides"].(map[string]any)
+	if !ok || ov == nil {
+		ov = map[string]any{}
+		root["overrides"] = ov
+		changed = true
+	}
+	for k, defVal := range requiredOverrides {
+		if _, exists := ov[k]; !exists {
+			ov[k] = defVal
+			changed = true
+		}
+	}
+
+	if loc == "forest" {
+		if n, ok := root["numrandom_set_pieces"].(int64); ok && n > 0 {
+			if rsp, ok := root["random_set_pieces"].(LuaArray); ok && len(rsp) > 0 {
+				if _, exists := root["required_setpieces"]; !exists {
+					root["required_setpieces"] = LuaArray{"Sculptures_1", "Maxwell5"}
+					changed = true
+				}
+			}
+		}
+	}
+
+	if !changed {
+		return src, false, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString("return ")
+	writeLuaValue(&sb, root, 0)
+	sb.WriteString("\n")
+	return sb.String(), true, nil
+}
+
 // --- Internal Lua <-> Go Conversion & Serialization ---
 
 func evalReturnTable(src string) (any, error) {

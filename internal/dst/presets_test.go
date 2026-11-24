@@ -40,11 +40,27 @@ func TestBuiltinPresetsHaveValidDSTWorldgenFields(t *testing.T) {
 
 		taskSet, _ := parsed.Overrides["task_set"].(string)
 		startLoc, _ := parsed.Overrides["start_location"].(string)
+		layoutMode, _ := parsed.Overrides["layout_mode"].(string)
+		wormholePrefab, _ := parsed.Overrides["wormhole_prefab"].(string)
+		roads, _ := parsed.Overrides["roads"].(string)
+		seasonStart, _ := parsed.Overrides["season_start"].(string)
 		if taskSet == "" {
 			t.Errorf("preset %q missing overrides.task_set", preset.ID)
 		}
 		if startLoc == "" {
 			t.Errorf("preset %q missing overrides.start_location", preset.ID)
+		}
+		if layoutMode == "" {
+			t.Errorf("preset %q missing overrides.layout_mode", preset.ID)
+		}
+		if wormholePrefab == "" {
+			t.Errorf("preset %q missing overrides.wormhole_prefab", preset.ID)
+		}
+		if roads == "" {
+			t.Errorf("preset %q missing overrides.roads", preset.ID)
+		}
+		if seasonStart == "" {
+			t.Errorf("preset %q missing overrides.season_start", preset.ID)
 		}
 
 		switch preset.Shard {
@@ -55,6 +71,15 @@ func TestBuiltinPresetsHaveValidDSTWorldgenFields(t *testing.T) {
 			if taskSet != "default" {
 				t.Errorf("master preset %q expected task_set=default, got %q", preset.ID, taskSet)
 			}
+			if layoutMode != "LinkNodesByKeys" {
+				t.Errorf("master preset %q expected layout_mode=LinkNodesByKeys, got %q", preset.ID, layoutMode)
+			}
+			if wormholePrefab != "wormhole" {
+				t.Errorf("master preset %q expected wormhole_prefab=wormhole, got %q", preset.ID, wormholePrefab)
+			}
+			if roads != "default" {
+				t.Errorf("master preset %q expected roads=default, got %q", preset.ID, roads)
+			}
 		case "caves":
 			if !validCaveIDs[parsed.ID] {
 				t.Errorf("caves preset %q has invalid DST worldgen id %q", preset.ID, parsed.ID)
@@ -62,8 +87,23 @@ func TestBuiltinPresetsHaveValidDSTWorldgenFields(t *testing.T) {
 			if taskSet != "cave_default" {
 				t.Errorf("caves preset %q expected task_set=cave_default, got %q", preset.ID, taskSet)
 			}
+			if layoutMode != "RestrictNodesByKey" {
+				t.Errorf("caves preset %q expected layout_mode=RestrictNodesByKey, got %q", preset.ID, layoutMode)
+			}
+			if wormholePrefab != "tentacle_pillar" {
+				t.Errorf("caves preset %q expected wormhole_prefab=tentacle_pillar, got %q", preset.ID, wormholePrefab)
+			}
+			if roads != "never" {
+				t.Errorf("caves preset %q expected roads=never, got %q", preset.ID, roads)
+			}
 		default:
 			t.Errorf("preset %q has unexpected shard %q", preset.ID, preset.Shard)
+		}
+
+		if _, changed, err := lua.EnsureLevelDataDefaults(preset.Lua, preset.Shard); err != nil {
+			t.Errorf("preset %q EnsureLevelDataDefaults error: %v", preset.ID, err)
+		} else if changed {
+			t.Errorf("preset %q is missing mandatory DST location defaults (EnsureLevelDataDefaults reported changes)", preset.ID)
 		}
 	}
 }

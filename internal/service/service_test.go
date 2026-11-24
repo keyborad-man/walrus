@@ -8,6 +8,7 @@ import (
 
 	"walrus/internal/db"
 	"walrus/internal/dst"
+	"walrus/internal/lua"
 	"walrus/internal/runtime"
 )
 
@@ -86,5 +87,86 @@ func TestClusterAndBackupLifecycle(t *testing.T) {
 	}
 	if len(backups) != 2 {
 		t.Fatalf("expected 2 backups (manual + pre_restore), got %d", len(backups))
+	}
+}
+
+func TestStartShardBackfillsMissingLevelDataDefaults(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	clusterSvc := NewClusterService(store, fs, driver)
+
+	if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:    "legacy_world",
+		ClusterName:  "Legacy World",
+		GameMode:     "endless",
+		CavesEnabled: true,
+	}); err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+
+	// Simulate pre-fix leveldataoverride.lua files missing layout_mode / task_set.
+	if err := fs.WriteLevelData("legacy_world", "master", `return {
+  desc="Standard",
+  id="SURVIVAL_TOGETHER",
+  location="forest",
+  name="Standard Forest",
+  overrides={
+    task_set="default",
+    world_size="default",
+  },
+  version=4,
+}
+`); err != nil {
+		t.Fatalf("write legacy master lua: %v", err)
+	}
+	if err := fs.WriteLevelData("legacy_world", "caves", `return {
+  desc="The Caves",
+  id="DST_CAVE",
+  location="cave",
+  name="The Caves",
+  overrides={
+    world_size="default",
+  },
+  version=4,
+}
+`); err != nil {
+		t.Fatalf("write legacy caves lua: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := clusterSvc.StartCluster(ctx, "legacy_world"); err != nil {
+		t.Fatalf("start cluster: %v", err)
+	}
+	defer func() { _ = clusterSvc.StopCluster(ctx, "legacy_world") }()
+
+	masterRaw, err := fs.ReadLevelData("legacy_world", "master")
+	if err != nil {
+		t.Fatalf("read master lua: %v", err)
+	}
+	masterParsed, err := lua.ParseLevelData(masterRaw)
+	if err != nil {
+		t.Fatalf("parse master lua: %v", err)
+	}
+	if masterParsed.Overrides["layout_mode"] != "LinkNodesByKeys" {
+		t.Fatalf("expected master layout_mode=LinkNodesByKeys, got %v", masterParsed.Overrides["layout_mode"])
+	}
+
+	cavesRaw, err := fs.ReadLevelData("legacy_world", "caves")
+	if err != nil {
+		t.Fatalf("read caves lua: %v", err)
+	}
+	cavesParsed, err := lua.ParseLevelData(cavesRaw)
+	if err != nil {
+		t.Fatalf("parse caves lua: %v", err)
+	}
+	if cavesParsed.Overrides["task_set"] != "cave_default" || cavesParsed.Overrides["layout_mode"] != "RestrictNodesByKey" {
+		t.Fatalf("expected caves task_set=cave_default and layout_mode=RestrictNodesByKey, got %+v", cavesParsed.Overrides)
 	}
 }
