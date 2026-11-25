@@ -34,7 +34,7 @@ import {
   suggestClusterId,
   type PlaystyleId,
 } from '@/lib/worldHelpers'
-import { useRegisterUnsaved } from '@/hooks/useUnsavedGuard'
+import { useRegisterUnsaved, useUnsavedGuard } from '@/hooks/useUnsavedGuard'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input, Label, SecretInput } from '@/components/ui/input'
@@ -130,6 +130,7 @@ export function CreateClusterPage() {
   const isEn = i18n.language === 'en-US'
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { setDirty } = useUnsavedGuard()
 
   const fallbackSuffixRef = useRef(String(Math.floor(1000 + Math.random() * 9000)))
   const clusterNameRef = useRef<HTMLInputElement | null>(null)
@@ -263,6 +264,7 @@ export function CreateClusterPage() {
   const createMut = useMutation({
     mutationFn: api.createCluster,
     onSuccess: (res) => {
+      setDirty('create-world-wizard', false)
       toast.success(t('createWorld.createdToast', { name: res.cluster.cluster_ini.cluster_name }))
       void qc.invalidateQueries({ queryKey: ['clusters'] })
       navigate(`/clusters/${encodeURIComponent(res.cluster.cluster_id)}/overview`, { replace: true })
