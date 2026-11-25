@@ -105,6 +105,7 @@ export const api = {
   // System
   healthz: () => request<{ status: string; runtime: string; version: string }>('/healthz'),
   metrics: () => request<{ metrics: HostMetrics }>('/api/v1/system/metrics'),
+  publicIP: () => request<{ ip: string }>('/api/v1/system/public-ip'),
   systemVersion: () => request<{ info: SystemVersionInfo }>('/api/v1/system/version'),
   checkSystemVersion: () =>
     request<{ info: SystemVersionInfo }>('/api/v1/system/version/check', { method: 'POST' }),

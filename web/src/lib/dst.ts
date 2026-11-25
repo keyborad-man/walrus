@@ -82,6 +82,19 @@ export function formatAuditAction(action: string, isEn: boolean): string {
   return action
 }
 
+function escapeLuaString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+}
+
+export function formatConnectCommand(host: string, port: number, password?: string): string {
+  const fallbackHost = typeof window !== 'undefined' ? window.location.hostname : ''
+  const resolvedHost = escapeLuaString(host.trim() || fallbackHost || '127.0.0.1')
+  if (password) {
+    return `c_connect("${resolvedHost}", ${port}, "${escapeLuaString(password)}")`
+  }
+  return `c_connect("${resolvedHost}", ${port})`
+}
+
 const SPECIAL_CRONS = new Set(['@yearly', '@annually', '@monthly', '@weekly', '@daily', '@midnight', '@hourly'])
 const CRON_FIELD_RE = /^(\*|\d+(-\d+)?(,\d+(-\d+)?)*)(\/\d+)?$/
 

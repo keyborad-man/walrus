@@ -98,18 +98,19 @@ type SystemSettings struct {
 }
 
 type ModCache struct {
-	ModID        string    `json:"mod_id"` // e.g. "workshop-378160973" or local folder name
-	WorkshopID   string    `json:"workshop_id"`
-	IsLocal      bool      `json:"is_local"`
-	Name         string    `json:"name"`
-	Author       string    `json:"author"`
-	Version      string    `json:"version"`
-	Description  string    `json:"description"`
-	PreviewURL   string    `json:"preview_url"`
-	ClientOnly   bool      `json:"client_only"`
-	ServerTags   string    `json:"server_tags"`
-	TimeUpdated  int64     `json:"time_updated"`
-	LastSyncedAt time.Time `json:"last_synced_at"`
+	ModID                string    `json:"mod_id"` // e.g. "workshop-378160973" or local folder name
+	WorkshopID           string    `json:"workshop_id"`
+	IsLocal              bool      `json:"is_local"`
+	Name                 string    `json:"name"`
+	Author               string    `json:"author"`
+	Version              string    `json:"version"`
+	Description          string    `json:"description"`
+	PreviewURL           string    `json:"preview_url"`
+	ClientOnly           bool      `json:"client_only"`
+	ServerTags           string    `json:"server_tags"`
+	TimeUpdated          int64     `json:"time_updated"`
+	InstalledTimeUpdated int64     `json:"installed_time_updated"`
+	LastSyncedAt         time.Time `json:"last_synced_at"`
 }
 
 type PlayerHistory struct {
@@ -132,7 +133,7 @@ type ScheduledTask struct {
 	ID         int64      `json:"id"`
 	ClusterID  string     `json:"cluster_id"` // specific cluster_id or "*"
 	Name       string     `json:"name"`
-	TaskType   string     `json:"task_type"` // backup | restart | announce | update
+	TaskType   string     `json:"task_type"` // backup | restart | announce | update | mod_update
 	CronExpr   string     `json:"cron_expr"` // 5-field standard cron
 	ParamsJSON string     `json:"params_json"`
 	Enabled    bool       `json:"enabled"`

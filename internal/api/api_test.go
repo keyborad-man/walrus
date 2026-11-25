@@ -57,6 +57,7 @@ func setupTestEngine(t *testing.T) (http.Handler, func()) {
 	clusterSvc.SetModService(modSvc)
 	fileSvc := service.NewFileService(fs)
 	cronSvc := service.NewCronService(store, fs, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
+	cronSvc.SetModService(modSvc)
 	_ = cronSvc.Start()
 
 	srv := NewServer(cfg, store, authSvc, driver, clusterSvc, backupSvc, modSvc, fileSvc, cronSvc, webhookSvc, steamMgr, nil, web.DistFS())
@@ -599,4 +600,143 @@ func TestNetworkProxySettingsAndTestEndpoint(t *testing.T) {
 	if enabled, url := ResolveEffectiveProxy(stUnset, "http://127.0.0.1:7890"); !enabled || url != "http://127.0.0.1:7890" {
 		t.Fatalf("expected unset settings to inherit default env proxy, got enabled=%v url=%q", enabled, url)
 	}
+}
+
+func TestScheduleModUpdateAndUpdateRBAC(t *testing.T) {
+	h, cleanup := setupTestEngine(t)
+	defer cleanup()
+
+	// Setup admin
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/auth/setup", "", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("setup failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var setupResp struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &setupResp)
+	adminTok := setupResp.Token
+
+	// Create cluster and operator user
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/clusters", adminTok, map[string]any{
+		"cluster_id":    "op_world",
+		"cluster_name":  "Op World",
+		"game_mode":     "endless",
+		"caves_enabled": false,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create cluster failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/users", adminTok, map[string]any{
+		"username": "op1",
+		"password": "password123",
+		"role":     "operator",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create operator failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"username": "op1",
+		"password": "password123",
+	})
+	var opLogin struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &opLogin)
+	opTok := opLogin.Token
+
+	// 1. Operator CAN create a cluster-scoped mod_update task
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/schedules", opTok, map[string]any{
+		"cluster_id": "op_world",
+		"name":       "Check Mod Updates",
+		"task_type":  "mod_update",
+		"cron_expr":  "0 */6 * * *",
+		"params": map[string]any{
+			"auto_upgrade":         true,
+			"only_when_empty":      true,
+			"backup_before_update": true,
+			"countdown_sec":        30,
+		},
+		"enabled": true,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("operator should be able to create cluster mod_update task, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var createdResp struct {
+		Task struct {
+			ID int64 `json:"id"`
+		} `json:"task"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &createdResp)
+
+	// 2. Operator CANNOT create wildcard (*) mod_update task
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/schedules", opTok, map[string]any{
+		"cluster_id": "*",
+		"name":       "Global Mod Update",
+		"task_type":  "mod_update",
+		"cron_expr":  "0 */6 * * *",
+		"enabled":    true,
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for operator wildcard mod_update, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. Operator CANNOT create or escalate an existing task into DST server update
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/schedules", opTok, map[string]any{
+		"cluster_id": "op_world",
+		"name":       "DST Update",
+		"task_type":  "update",
+		"cron_expr":  "0 4 * * *",
+		"enabled":    true,
+	})
+	if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeAdminRequiredForUpdate)) {
+		t.Fatalf("expected 403 ADMIN_REQUIRED_FOR_UPDATE_TASK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/schedules/1", opTok, map[string]any{
+		"cluster_id": "op_world",
+		"name":       "Escalate To Update",
+		"task_type":  "update",
+		"cron_expr":  "0 4 * * *",
+		"enabled":    true,
+	})
+	if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeAdminRequiredForUpdate)) {
+		t.Fatalf("expected 403 on update escalation, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Invalid task_type rejected on both POST and PUT
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/schedules/1", adminTok, map[string]any{
+		"cluster_id": "op_world",
+		"name":       "Bad Type",
+		"task_type":  "invalid_type",
+		"cron_expr":  "0 4 * * *",
+		"enabled":    true,
+	})
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeInvalidTaskType)) {
+		t.Fatalf("expected 400 INVALID_TASK_TYPE on PUT, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. Admin creating DST update normalizes cluster_id to "*"
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/schedules", adminTok, map[string]any{
+		"cluster_id": "op_world",
+		"name":       "DST Auto Upgrade",
+		"task_type":  "update",
+		"cron_expr":  "0 4 * * *",
+		"params":     map[string]any{"auto_upgrade": false},
+		"enabled":    true,
+	})
+	if rec.Code != http.StatusCreated || !bytes.Contains(rec.Body.Bytes(), []byte(`"cluster_id":"*"`)) {
+		t.Fatalf("expected admin update task normalized to cluster_id='*', got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 6. Webhook all_events exposes mod.update_available & mod.update_complete
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/webhooks", adminTok, nil)
+	if rec.Code != http.StatusOK ||
+		!bytes.Contains(rec.Body.Bytes(), []byte("mod.update_available")) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte("mod.update_complete")) {
+		t.Fatalf("expected mod update events in webhooks list, got %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = createdResp
 }

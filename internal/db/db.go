@@ -167,6 +167,7 @@ func (s *Store) migrate() error {
 			client_only INTEGER NOT NULL DEFAULT 0,
 			server_tags TEXT NOT NULL DEFAULT '',
 			time_updated INTEGER NOT NULL DEFAULT 0,
+			installed_time_updated INTEGER NOT NULL DEFAULT 0,
 			last_synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 	}
@@ -175,6 +176,10 @@ func (s *Store) migrate() error {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("exec migration: %w", err)
 		}
+	}
+
+	if err := s.ensureColumnExists("mod_cache", "installed_time_updated", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("migrate mod_cache.installed_time_updated: %w", err)
 	}
 
 	// Ensure default system settings exist.
@@ -196,6 +201,28 @@ func (s *Store) migrate() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureColumnExists(table, column, columnDef string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, columnDef))
+	return err
 }
 
 // --- Settings ---
@@ -687,8 +714,8 @@ func (s *Store) UpsertModCache(m *ModCache) error {
 		m.LastSyncedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO mod_cache(mod_id, workshop_id, is_local, name, author, version, description, preview_url, client_only, server_tags, time_updated, last_synced_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO mod_cache(mod_id, workshop_id, is_local, name, author, version, description, preview_url, client_only, server_tags, time_updated, installed_time_updated, last_synced_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(mod_id) DO UPDATE SET
 		   workshop_id = CASE WHEN excluded.workshop_id != '' THEN excluded.workshop_id ELSE mod_cache.workshop_id END,
 		   is_local = excluded.is_local,
@@ -700,8 +727,9 @@ func (s *Store) UpsertModCache(m *ModCache) error {
 		   client_only = excluded.client_only,
 		   server_tags = CASE WHEN excluded.server_tags != '' THEN excluded.server_tags ELSE mod_cache.server_tags END,
 		   time_updated = CASE WHEN excluded.time_updated > 0 THEN excluded.time_updated ELSE mod_cache.time_updated END,
+		   installed_time_updated = CASE WHEN excluded.installed_time_updated > 0 THEN excluded.installed_time_updated ELSE mod_cache.installed_time_updated END,
 		   last_synced_at = excluded.last_synced_at`,
-		m.ModID, m.WorkshopID, boolInt(m.IsLocal), m.Name, m.Author, m.Version, m.Description, m.PreviewURL, boolInt(m.ClientOnly), m.ServerTags, m.TimeUpdated, m.LastSyncedAt,
+		m.ModID, m.WorkshopID, boolInt(m.IsLocal), m.Name, m.Author, m.Version, m.Description, m.PreviewURL, boolInt(m.ClientOnly), m.ServerTags, m.TimeUpdated, m.InstalledTimeUpdated, m.LastSyncedAt,
 	)
 	return err
 }
@@ -710,9 +738,9 @@ func (s *Store) GetModCache(modID string) (*ModCache, error) {
 	m := &ModCache{}
 	var isLocal, clientOnly int
 	err := s.db.QueryRow(
-		`SELECT mod_id, workshop_id, is_local, name, author, version, description, preview_url, client_only, server_tags, time_updated, last_synced_at FROM mod_cache WHERE mod_id = ?`,
+		`SELECT mod_id, workshop_id, is_local, name, author, version, description, preview_url, client_only, server_tags, time_updated, installed_time_updated, last_synced_at FROM mod_cache WHERE mod_id = ?`,
 		modID,
-	).Scan(&m.ModID, &m.WorkshopID, &isLocal, &m.Name, &m.Author, &m.Version, &m.Description, &m.PreviewURL, &clientOnly, &m.ServerTags, &m.TimeUpdated, &m.LastSyncedAt)
+	).Scan(&m.ModID, &m.WorkshopID, &isLocal, &m.Name, &m.Author, &m.Version, &m.Description, &m.PreviewURL, &clientOnly, &m.ServerTags, &m.TimeUpdated, &m.InstalledTimeUpdated, &m.LastSyncedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -725,7 +753,7 @@ func (s *Store) GetModCache(modID string) (*ModCache, error) {
 }
 
 func (s *Store) ListModCache() ([]ModCache, error) {
-	rows, err := s.db.Query(`SELECT mod_id, workshop_id, is_local, name, author, version, description, preview_url, client_only, server_tags, time_updated, last_synced_at FROM mod_cache ORDER BY is_local DESC, name ASC`)
+	rows, err := s.db.Query(`SELECT mod_id, workshop_id, is_local, name, author, version, description, preview_url, client_only, server_tags, time_updated, installed_time_updated, last_synced_at FROM mod_cache ORDER BY is_local DESC, name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -734,7 +762,7 @@ func (s *Store) ListModCache() ([]ModCache, error) {
 	for rows.Next() {
 		var m ModCache
 		var isLocal, clientOnly int
-		if err := rows.Scan(&m.ModID, &m.WorkshopID, &isLocal, &m.Name, &m.Author, &m.Version, &m.Description, &m.PreviewURL, &clientOnly, &m.ServerTags, &m.TimeUpdated, &m.LastSyncedAt); err != nil {
+		if err := rows.Scan(&m.ModID, &m.WorkshopID, &isLocal, &m.Name, &m.Author, &m.Version, &m.Description, &m.PreviewURL, &clientOnly, &m.ServerTags, &m.TimeUpdated, &m.InstalledTimeUpdated, &m.LastSyncedAt); err != nil {
 			return nil, err
 		}
 		m.IsLocal = isLocal != 0

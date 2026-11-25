@@ -105,6 +105,7 @@ func main() {
 	clusterSvc.SetModService(modSvc)
 	fileSvc := service.NewFileService(dstFS)
 	cronSvc := service.NewCronService(store, dstFS, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
+	cronSvc.SetModService(modSvc)
 
 	backupSvc.SetOnImportedHook(func() {
 		_ = modSvc.SyncDedicatedServerModsSetup()

@@ -68,6 +68,7 @@ type Manager struct {
 	dstServerDir string
 	runtimeMode  string
 	httpClient   *http.Client
+	buildsURL    string
 
 	mu            sync.RWMutex
 	proxyURL      string
@@ -91,10 +92,18 @@ func NewManager(steamCMDDir, dstServerDir, runtimeMode string) *Manager {
 		dstServerDir: dstServerDir,
 		runtimeMode:  runtimeMode,
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		buildsURL:    KleiBuildsURL,
 		taskState:    TaskIdle,
 		logs:         make([]LogLine, 0, 400),
 		subs:         make(map[uint64]chan LogLine),
 	}
+}
+
+// SetBuildsURL overrides the Klei builds.json URL (primarily for testing).
+func (m *Manager) SetBuildsURL(endpoint string) {
+	m.mu.Lock()
+	m.buildsURL = strings.TrimSpace(endpoint)
+	m.mu.Unlock()
 }
 
 // SetProxy updates the outbound network proxy used for Klei version check HTTP requests.
@@ -272,7 +281,13 @@ func (m *Manager) Status(branch string) Status {
 
 // CheckRemoteVersion queries Klei's official builds.json endpoint.
 func (m *Manager) CheckRemoteVersion(ctx context.Context, branch string) (Status, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, KleiBuildsURL, nil)
+	m.mu.RLock()
+	targetURL := m.buildsURL
+	m.mu.RUnlock()
+	if targetURL == "" {
+		targetURL = KleiBuildsURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return m.Status(branch), err
 	}

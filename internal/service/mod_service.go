@@ -169,18 +169,21 @@ func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard 
 
 	// Best-effort refresh cached metadata (including Steam preview icons) for newly downloaded mods.
 	detailMap := s.fetchWorkshopDetails(ctx, missingWorkshopIDs)
+	nowUnix := time.Now().Unix()
 	for _, wid := range missingWorkshopIDs {
 		modID := "workshop-" + wid
 		_, info, cache, _ := s.inspectMod(modID, "zh-CN")
 		d, hasDetail := detailMap[wid]
-		if info == nil && !hasDetail {
-			continue
-		}
 		if cache == nil {
 			cache = &db.ModCache{ModID: modID, WorkshopID: wid}
 		}
 		if hasDetail {
 			mergeWorkshopDetailIntoCache(cache, d, info == nil)
+		}
+		if hasDetail && d.TimeUpdated > 0 {
+			cache.InstalledTimeUpdated = d.TimeUpdated
+		} else {
+			cache.InstalledTimeUpdated = nowUnix
 		}
 		if info != nil {
 			if info.Name != "" {
@@ -511,7 +514,7 @@ func (s *ModService) AddWorkshopInput(ctx context.Context, clusterID, shard, inp
 	for _, wid := range ids {
 		modID := "workshop-" + wid
 		// Download mod locally via SteamCMD so we can parse modinfo.lua immediately.
-		_, _ = s.steamMgr.DownloadWorkshopMod(ctx, wid)
+		_, dlErr := s.steamMgr.DownloadWorkshopMod(ctx, wid)
 
 		// Cache combined metadata from Steam API + parsed modinfo.lua.
 		cacheEntry := &db.ModCache{
@@ -526,6 +529,12 @@ func (s *ModService) AddWorkshopInput(ctx context.Context, clusterID, shard, inp
 			cacheEntry.TimeUpdated = d.TimeUpdated
 			cacheEntry.ClientOnly = d.IsClientOnly
 			cacheEntry.ServerTags = strings.Join(d.Tags, ",")
+			if dlErr == nil && d.TimeUpdated > 0 {
+				cacheEntry.InstalledTimeUpdated = d.TimeUpdated
+			}
+		}
+		if dlErr == nil && cacheEntry.InstalledTimeUpdated == 0 {
+			cacheEntry.InstalledTimeUpdated = time.Now().Unix()
 		}
 		_, info, _, _ := s.inspectMod(modID, locale)
 		defaults := map[string]any{}
@@ -693,12 +702,16 @@ func (s *ModService) RedownloadWorkshopMod(ctx context.Context, modID, locale st
 		if cache == nil {
 			cache = &db.ModCache{ModID: modID, WorkshopID: wid}
 		}
-		if cache.PreviewURL == "" {
-			if detailMap := s.fetchWorkshopDetails(ctx, []string{wid}); detailMap != nil {
-				if d, ok := detailMap[wid]; ok {
-					mergeWorkshopDetailIntoCache(cache, d, false)
+		if detailMap := s.fetchWorkshopDetails(ctx, []string{wid}); detailMap != nil {
+			if d, ok := detailMap[wid]; ok {
+				mergeWorkshopDetailIntoCache(cache, d, false)
+				if d.TimeUpdated > 0 {
+					cache.InstalledTimeUpdated = d.TimeUpdated
 				}
 			}
+		}
+		if cache.InstalledTimeUpdated == 0 {
+			cache.InstalledTimeUpdated = time.Now().Unix()
 		}
 		if info.Name != "" {
 			cache.Name = info.Name
@@ -712,6 +725,250 @@ func (s *ModService) RedownloadWorkshopMod(ctx context.Context, modID, locale st
 		_ = s.store.UpsertModCache(cache)
 	}
 	return nil
+}
+
+type OutdatedMod struct {
+	ModID             string   `json:"mod_id"`
+	WorkshopID        string   `json:"workshop_id"`
+	Name              string   `json:"name"`
+	LocalTimeUpdated  int64    `json:"local_time_updated"`
+	RemoteTimeUpdated int64    `json:"remote_time_updated"`
+	PreviewURL        string   `json:"preview_url,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	IsClientOnly      bool     `json:"is_client_only,omitempty"`
+	Missing           bool     `json:"missing"`
+}
+
+type ModUpdateCheckResult struct {
+	CheckedCount     int           `json:"checked_count"`
+	Outdated         []OutdatedMod `json:"outdated"`
+	AffectedClusters []string      `json:"affected_clusters"`
+}
+
+func (s *ModService) collectEnabledWorkshopMods(clusterIDs []string) map[string][]string {
+	widClusters := make(map[string]map[string]struct{})
+	for _, cid := range clusterIDs {
+		for _, sh := range []string{"master", "caves"} {
+			raw, err := s.fs.ReadModOverrides(cid, sh)
+			if err != nil {
+				continue
+			}
+			ovs, err := lua.ParseModOverrides(raw)
+			if err != nil {
+				continue
+			}
+			for modID, ov := range ovs {
+				if !ov.Enabled || !strings.HasPrefix(modID, "workshop-") {
+					continue
+				}
+				wid := strings.TrimSpace(strings.TrimPrefix(modID, "workshop-"))
+				if wid == "" {
+					continue
+				}
+				if widClusters[wid] == nil {
+					widClusters[wid] = make(map[string]struct{})
+				}
+				widClusters[wid][cid] = struct{}{}
+			}
+		}
+	}
+	out := make(map[string][]string, len(widClusters))
+	for wid, cset := range widClusters {
+		list := make([]string, 0, len(cset))
+		for cid := range cset {
+			list = append(list, cid)
+		}
+		sort.Strings(list)
+		out[wid] = list
+	}
+	return out
+}
+
+func (s *ModService) localModBaselineTime(modID string, cache *db.ModCache) int64 {
+	if cache != nil && cache.InstalledTimeUpdated > 0 {
+		return cache.InstalledTimeUpdated
+	}
+	if fi, err := os.Stat(filepath.Join(s.dstModsDir(), modID, "modinfo.lua")); err == nil && !fi.IsDir() {
+		return fi.ModTime().Unix()
+	}
+	return 0
+}
+
+// CheckModUpdates checks Steam Workshop for newer versions of enabled Workshop mods
+// across the target clusters and returns outdated items plus all clusters affected by them.
+func (s *ModService) CheckModUpdates(ctx context.Context, clusterIDs []string) (*ModUpdateCheckResult, error) {
+	enabledMap := s.collectEnabledWorkshopMods(clusterIDs)
+	if len(enabledMap) == 0 {
+		return &ModUpdateCheckResult{}, nil
+	}
+
+	wids := make([]string, 0, len(enabledMap))
+	for wid := range enabledMap {
+		wids = append(wids, wid)
+	}
+	sort.Strings(wids)
+
+	detailMap := make(map[string]steam.WorkshopItem, len(wids))
+	for start := 0; start < len(wids); start += previewBatchChunkSize {
+		end := start + previewBatchChunkSize
+		if end > len(wids) {
+			end = len(wids)
+		}
+		details, err := s.workshop.GetPublishedFileDetails(ctx, wids[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range details {
+			if d.WorkshopID != "" {
+				detailMap[d.WorkshopID] = d
+			}
+		}
+	}
+
+	var outdated []OutdatedMod
+	outdatedSet := make(map[string]struct{})
+	for _, wid := range wids {
+		modID := "workshop-" + wid
+		d, hasRemote := detailMap[wid]
+		cache, _ := s.store.GetModCache(modID)
+
+		displayName := modID
+		if cache != nil && cache.Name != "" {
+			displayName = cache.Name
+		}
+		if hasRemote && d.Title != "" && displayName == modID {
+			displayName = d.Title
+		}
+
+		installed := s.hasInstalledDSTMod(modID)
+		if !installed {
+			outdated = append(outdated, OutdatedMod{
+				ModID:             modID,
+				WorkshopID:        wid,
+				Name:              displayName,
+				RemoteTimeUpdated: d.TimeUpdated,
+				PreviewURL:        d.PreviewURL,
+				Description:       d.Description,
+				Tags:              d.Tags,
+				IsClientOnly:      d.IsClientOnly,
+				Missing:           true,
+			})
+			outdatedSet[wid] = struct{}{}
+			continue
+		}
+
+		if !hasRemote || d.TimeUpdated <= 0 {
+			continue
+		}
+
+		localTS := s.localModBaselineTime(modID, cache)
+		if d.TimeUpdated > localTS {
+			outdated = append(outdated, OutdatedMod{
+				ModID:             modID,
+				WorkshopID:        wid,
+				Name:              displayName,
+				LocalTimeUpdated:  localTS,
+				RemoteTimeUpdated: d.TimeUpdated,
+				PreviewURL:        d.PreviewURL,
+				Description:       d.Description,
+				Tags:              d.Tags,
+				IsClientOnly:      d.IsClientOnly,
+			})
+			outdatedSet[wid] = struct{}{}
+		}
+	}
+
+	var affected []string
+	if len(outdatedSet) > 0 {
+		allClusters, err := s.fs.ListClusterIDs()
+		if err != nil {
+			allClusters = clusterIDs
+		}
+		allEnabled := s.collectEnabledWorkshopMods(allClusters)
+		affectedSet := make(map[string]struct{})
+		for wid := range outdatedSet {
+			for _, cid := range allEnabled[wid] {
+				affectedSet[cid] = struct{}{}
+			}
+		}
+		affected = make([]string, 0, len(affectedSet))
+		for cid := range affectedSet {
+			affected = append(affected, cid)
+		}
+		sort.Strings(affected)
+	}
+
+	return &ModUpdateCheckResult{
+		CheckedCount:     len(wids),
+		Outdated:         outdated,
+		AffectedClusters: affected,
+	}, nil
+}
+
+// UpdateWorkshopMods downloads a batch of outdated Workshop mods via SteamCMD and refreshes mod_cache.
+func (s *ModService) UpdateWorkshopMods(ctx context.Context, outdated []OutdatedMod) error {
+	if len(outdated) == 0 {
+		return nil
+	}
+	if s.prepareSem != nil {
+		select {
+		case s.prepareSem <- struct{}{}:
+			defer func() { <-s.prepareSem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	wids := make([]string, 0, len(outdated))
+	for _, item := range outdated {
+		if strings.TrimSpace(item.WorkshopID) != "" {
+			wids = append(wids, strings.TrimSpace(item.WorkshopID))
+		}
+	}
+	if len(wids) == 0 {
+		return nil
+	}
+
+	if err := s.steamMgr.DownloadWorkshopMods(ctx, wids, nil); err != nil {
+		return err
+	}
+
+	nowUnix := time.Now().Unix()
+	for _, item := range outdated {
+		modID := "workshop-" + item.WorkshopID
+		_, info, cache, _ := s.inspectMod(modID, "zh-CN")
+		if cache == nil {
+			cache = &db.ModCache{ModID: modID, WorkshopID: item.WorkshopID}
+		}
+		if item.RemoteTimeUpdated > 0 {
+			cache.TimeUpdated = item.RemoteTimeUpdated
+			cache.InstalledTimeUpdated = item.RemoteTimeUpdated
+		} else {
+			cache.InstalledTimeUpdated = nowUnix
+		}
+		if item.PreviewURL != "" {
+			cache.PreviewURL = item.PreviewURL
+		}
+		if len(item.Tags) > 0 && cache.ServerTags == "" {
+			cache.ServerTags = strings.Join(item.Tags, ",")
+		}
+		if info != nil {
+			if info.Name != "" {
+				cache.Name = info.Name
+			}
+			cache.Author = info.Author
+			cache.Version = info.Version
+			if info.Description != "" {
+				cache.Description = info.Description
+			}
+			cache.ClientOnly = info.ClientOnlyMod
+		} else if cache.Name == "" && item.Name != "" {
+			cache.Name = item.Name
+		}
+		_ = s.store.UpsertModCache(cache)
+	}
+	return s.SyncDedicatedServerModsSetup()
 }
 
 // SyncDedicatedServerModsSetup scans all clusters and generates dst-server/mods/dedicated_server_mods_setup.lua.

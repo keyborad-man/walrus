@@ -30,6 +30,8 @@ var AllWebhookEvents = []string{
 	"backup.failed",
 	"steam.update_available",
 	"steam.update_complete",
+	"mod.update_available",
+	"mod.update_complete",
 	"cron.failed",
 }
 

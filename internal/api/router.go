@@ -36,6 +36,7 @@ type Server struct {
 	updaterSvc *updater.Service
 	wsHandler  *ws.ConsoleHandler
 	steamWS    *ws.SteamHandler
+	publicIP   *publicIPResolver
 	staticFS   fs.FS
 }
 
@@ -72,6 +73,7 @@ func NewServer(
 		updaterSvc: updaterSvc,
 		wsHandler:  ws.NewConsoleHandler(store, driver),
 		steamWS:    ws.NewSteamHandler(store, steamMgr),
+		publicIP:   newPublicIPResolver(),
 		staticFS:   staticFS,
 	}
 }
@@ -109,6 +111,7 @@ func (s *Server) Engine() *gin.Engine {
 		{
 			authed.GET("/auth/me", s.handleMe)
 			authed.GET("/system/metrics", s.handleSystemMetrics)
+			authed.GET("/system/public-ip", s.handleSystemPublicIP)
 			authed.GET("/system/version", s.handleSystemVersion)
 			authed.GET("/presets", s.handleListPresets)
 			authed.GET("/steam/status", s.handleSteamStatus)

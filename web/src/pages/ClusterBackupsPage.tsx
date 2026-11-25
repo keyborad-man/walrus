@@ -30,6 +30,8 @@ const CRON_PRESET_KEYS = [
   { key: 'weeklySun3', expr: '0 3 * * 0' },
 ] as const
 
+type ScheduleTaskType = 'backup' | 'restart' | 'announce' | 'update' | 'mod_update'
+
 export function ClusterBackupsPage() {
   const { id = '' } = useParams<{ id: string }>()
   const { t, i18n } = useTranslation()
@@ -44,12 +46,14 @@ export function ClusterBackupsPage() {
   const [schedOpen, setSchedOpen] = useState(false)
   const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null)
   const [taskName, setTaskName] = useState('')
-  const [taskType, setTaskType] = useState<'backup' | 'restart' | 'announce' | 'update'>('backup')
+  const [taskType, setTaskType] = useState<ScheduleTaskType>('backup')
   const [cronExpr, setCronExpr] = useState('0 4 * * *')
   const [scopeAll, setScopeAll] = useState(false)
   const [countdownSec, setCountdownSec] = useState(60)
   const [announceMsg, setAnnounceMsg] = useState('')
+  const [autoUpgrade, setAutoUpgrade] = useState(true)
   const [onlyWhenEmpty, setOnlyWhenEmpty] = useState(true)
+  const [backupBeforeUpdate, setBackupBeforeUpdate] = useState(false)
   const [taskEnabled, setTaskEnabled] = useState(true)
   const [runningTaskId, setRunningTaskId] = useState<number | null>(null)
 
@@ -102,7 +106,9 @@ export function ClusterBackupsPage() {
     setScopeAll(false)
     setCountdownSec(60)
     setAnnounceMsg('')
+    setAutoUpgrade(true)
     setOnlyWhenEmpty(true)
+    setBackupBeforeUpdate(false)
     setTaskEnabled(true)
     setSchedOpen(true)
   }
@@ -116,7 +122,7 @@ export function ClusterBackupsPage() {
     }
     setEditingTask(task)
     setTaskName(task.name)
-    setTaskType((task.task_type as 'backup' | 'restart' | 'announce' | 'update') || 'backup')
+    setTaskType((task.task_type as ScheduleTaskType) || 'backup')
     setCronExpr(task.cron_expr)
     setScopeAll(task.cluster_id === '*')
     setCountdownSec(typeof parsed.countdown_sec === 'number' ? parsed.countdown_sec : 60)
@@ -127,7 +133,9 @@ export function ClusterBackupsPage() {
           ? parsed.note
           : '',
     )
+    setAutoUpgrade(typeof parsed.auto_upgrade === 'boolean' ? parsed.auto_upgrade : true)
     setOnlyWhenEmpty(typeof parsed.only_when_empty === 'boolean' ? parsed.only_when_empty : true)
+    setBackupBeforeUpdate(typeof parsed.backup_before_update === 'boolean' ? parsed.backup_before_update : false)
     setTaskEnabled(task.enabled)
     setSchedOpen(true)
   }
@@ -167,12 +175,16 @@ export function ClusterBackupsPage() {
     mutationFn: () => {
       const params: Record<string, unknown> = {}
       if (taskType === 'restart') {
-        params.countdown_sec = Number(countdownSec) || 60
+        params.countdown_sec = Math.max(0, Number(countdownSec) || 0)
         if (announceMsg.trim()) params.message = announceMsg.trim()
       } else if (taskType === 'announce') {
         params.message = announceMsg.trim()
-      } else if (taskType === 'update') {
+      } else if (taskType === 'update' || taskType === 'mod_update') {
+        params.auto_upgrade = autoUpgrade
         params.only_when_empty = onlyWhenEmpty
+        params.backup_before_update = backupBeforeUpdate
+        params.countdown_sec = Math.max(0, Number(countdownSec) || 0)
+        if (announceMsg.trim()) params.message = announceMsg.trim()
       } else if (taskType === 'backup' && announceMsg.trim()) {
         params.note = announceMsg.trim()
       }
@@ -560,7 +572,15 @@ export function ClusterBackupsPage() {
                               <td className="py-3 pr-4 text-xs text-muted-foreground tabular-nums">
                                 <div>{task.last_run_at ? formatDateTime(task.last_run_at) : '—'}</div>
                                 {task.last_status && (
-                                  <div className="font-mono text-xs truncate max-w-[180px]">{task.last_status}</div>
+                                  <div
+                                    title={task.last_status}
+                                    className={cn(
+                                      'font-mono text-xs truncate max-w-[220px]',
+                                      task.last_status.startsWith('error:') && 'text-red-700 dark:text-red-400',
+                                    )}
+                                  >
+                                    {task.last_status}
+                                  </div>
                                 )}
                               </td>
                               <td className="py-3 pr-4">
@@ -682,12 +702,13 @@ export function ClusterBackupsPage() {
               <Select
                 id="sched-type"
                 value={taskType}
-                onChange={(e) => setTaskType(e.target.value as typeof taskType)}
+                onChange={(e) => setTaskType(e.target.value as ScheduleTaskType)}
               >
                 <option value="backup">{t('schedules.types.backup')}</option>
                 <option value="restart">{t('schedules.types.restart')}</option>
                 <option value="announce">{t('schedules.types.announce')}</option>
                 {isAdmin && <option value="update">{t('schedules.types.update')}</option>}
+                <option value="mod_update">{t('schedules.types.mod_update')}</option>
               </Select>
             </div>
           </div>
@@ -771,19 +792,92 @@ export function ClusterBackupsPage() {
             </div>
           )}
 
-          {taskType === 'update' && (
-            <label
-              htmlFor="sched-only-empty"
-              className="flex items-center justify-between rounded-lg border border-border p-3 cursor-pointer"
-            >
-              <span className="text-sm">{t('schedules.onlyWhenEmpty')}</span>
-              <Switch
-                id="sched-only-empty"
-                checked={onlyWhenEmpty}
-                onCheckedChange={setOnlyWhenEmpty}
-                ariaLabel={t('schedules.onlyWhenEmpty')}
-              />
-            </label>
+          {(taskType === 'update' || taskType === 'mod_update') && (
+            <div className="space-y-3">
+              <label
+                htmlFor="sched-auto-upgrade"
+                className="flex items-start justify-between gap-3 rounded-lg border border-border p-3 cursor-pointer"
+              >
+                <div className="space-y-0.5">
+                  <div className="text-sm font-medium">{t('schedules.autoUpgrade')}</div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">{t('schedules.autoUpgradeHint')}</p>
+                </div>
+                <Switch
+                  id="sched-auto-upgrade"
+                  checked={autoUpgrade}
+                  onCheckedChange={setAutoUpgrade}
+                  ariaLabel={t('schedules.autoUpgrade')}
+                />
+              </label>
+
+              {autoUpgrade && (
+                <>
+                  <label
+                    htmlFor="sched-only-empty"
+                    className="flex items-center justify-between gap-3 rounded-lg border border-border p-3 cursor-pointer"
+                  >
+                    <span className="text-sm">
+                      {taskType === 'mod_update' ? t('schedules.onlyWhenEmptyMods') : t('schedules.onlyWhenEmpty')}
+                    </span>
+                    <Switch
+                      id="sched-only-empty"
+                      checked={onlyWhenEmpty}
+                      onCheckedChange={setOnlyWhenEmpty}
+                      ariaLabel={
+                        taskType === 'mod_update' ? t('schedules.onlyWhenEmptyMods') : t('schedules.onlyWhenEmpty')
+                      }
+                    />
+                  </label>
+
+                  <label
+                    htmlFor="sched-backup-before"
+                    className="flex items-start justify-between gap-3 rounded-lg border border-border p-3 cursor-pointer"
+                  >
+                    <div className="space-y-0.5">
+                      <div className="text-sm">{t('schedules.backupBeforeUpdate')}</div>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        {t('schedules.backupBeforeUpdateHint')}
+                      </p>
+                    </div>
+                    <Switch
+                      id="sched-backup-before"
+                      checked={backupBeforeUpdate}
+                      onCheckedChange={setBackupBeforeUpdate}
+                      ariaLabel={t('schedules.backupBeforeUpdate')}
+                    />
+                  </label>
+
+                  {!onlyWhenEmpty && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="sched-upd-cd">{t('schedules.countdownSec')}</Label>
+                        <Input
+                          id="sched-upd-cd"
+                          type="number"
+                          min={0}
+                          max={600}
+                          value={countdownSec}
+                          onChange={(e) => setCountdownSec(Number(e.target.value))}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="sched-upd-msg">{t('schedules.announceMsg')}</Label>
+                        <Input
+                          id="sched-upd-msg"
+                          value={announceMsg}
+                          onChange={(e) => setAnnounceMsg(e.target.value)}
+                          placeholder={
+                            taskType === 'mod_update'
+                              ? t('schedules.modUpdateMsgPlaceholder')
+                              : t('schedules.updateMsgPlaceholder')
+                          }
+                        />
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           )}
 
           {isAdmin && taskType !== 'update' && (

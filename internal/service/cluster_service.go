@@ -15,10 +15,11 @@ import (
 )
 
 type ClusterSummary struct {
-	ClusterID      string                   `json:"cluster_id"`
-	ClusterName    string                   `json:"cluster_name"`
-	Description    string                   `json:"description"`
-	GameMode       string                   `json:"game_mode"`
+	ClusterID       string                   `json:"cluster_id"`
+	ClusterName     string                   `json:"cluster_name"`
+	Description     string                   `json:"description"`
+	ClusterPassword string                   `json:"cluster_password,omitempty"`
+	GameMode        string                   `json:"game_mode"`
 	MaxPlayers     int                      `json:"max_players"`
 	CavesEnabled   bool                     `json:"caves_enabled"`
 	AutoRestart    bool                     `json:"auto_restart"`
@@ -131,10 +132,11 @@ func (s *ClusterService) ListClusters(u *db.User) ([]ClusterSummary, error) {
 
 		tok, _ := s.fs.ReadClusterToken(id)
 		summary := ClusterSummary{
-			ClusterID:     id,
-			ClusterName:   ci.ClusterName,
-			Description:   ci.ClusterDescription,
-			GameMode:      ci.GameMode,
+			ClusterID:       id,
+			ClusterName:     ci.ClusterName,
+			Description:     ci.ClusterDescription,
+			ClusterPassword: ci.ClusterPassword,
+			GameMode:        ci.GameMode,
 			MaxPlayers:    ci.MaxPlayers,
 			CavesEnabled:  cavesEnabled,
 			AutoRestart:   autoRestart,

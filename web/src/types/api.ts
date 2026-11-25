@@ -53,6 +53,7 @@ export interface ClusterSummary {
   cluster_id: string
   cluster_name: string
   description: string
+  cluster_password?: string
   game_mode: string
   max_players: number
   caves_enabled: boolean
@@ -442,7 +443,7 @@ export interface ScheduledTask {
   id: number
   cluster_id: string
   name: string
-  task_type: 'backup' | 'restart' | 'announce' | 'update' | string
+  task_type: 'backup' | 'restart' | 'announce' | 'update' | 'mod_update' | string
   cron_expr: string
   params_json: string
   enabled: boolean

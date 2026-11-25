@@ -17,7 +17,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { formatAuditAction } from '@/lib/dst'
+import { formatAuditAction, formatConnectCommand } from '@/lib/dst'
 import { cn, getClusterHealth } from '@/lib/utils'
 import { useAuth } from '@/hooks/useAuth'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -69,6 +69,12 @@ export function DashboardPage() {
     queryFn: api.metrics,
     refetchInterval: 4000,
   })
+  const { data: publicIpData } = useQuery({
+    queryKey: ['system-public-ip'],
+    queryFn: api.publicIP,
+    staleTime: 10 * 60 * 1000,
+    retry: false,
+  })
   const {
     data: clustersData,
     isLoading,
@@ -94,6 +100,7 @@ export function DashboardPage() {
   })
 
   const metrics = metricsData?.metrics
+  const connectHost = publicIpData?.ip || window.location.hostname
   const clusters = clustersData?.clusters ?? []
   const steamStatus = steamData?.status
   const recentLogs = auditData?.logs ?? []
@@ -592,12 +599,16 @@ export function DashboardPage() {
                         <ShardCell
                           label={t('common.masterShort')}
                           port={c.master_port}
+                          connectHost={connectHost}
+                          password={c.cluster_password}
                           status={c.master_status}
                         />
                         {c.caves_enabled && c.caves_status ? (
                           <ShardCell
                             label={t('common.cavesShort')}
                             port={c.caves_port}
+                            connectHost={connectHost}
+                            password={c.cluster_password}
                             status={c.caves_status}
                           />
                         ) : (
@@ -854,10 +865,23 @@ function TelemetryCell({
   )
 }
 
-function ShardCell({ label, port, status }: { label: string; port?: number; status: ShardStatus }) {
+function ShardCell({
+  label,
+  port,
+  connectHost,
+  password,
+  status,
+}: {
+  label: string
+  port?: number
+  connectHost: string
+  password?: string
+  status: ShardStatus
+}) {
   const { t } = useTranslation()
   const state = status.state
   const active = state === 'running' || state === 'starting'
+  const connectCmd = port ? formatConnectCommand(connectHost, port, password) : ''
 
   const dotCls =
     state === 'running'
@@ -880,7 +904,7 @@ function ShardCell({ label, port, status }: { label: string; port?: number; stat
         {port ? (
           <span className="inline-flex items-center gap-0.5 font-mono text-[11.5px] text-muted-foreground tabular-nums">
             :{port}
-            <CopyButton value={String(port)} />
+            <CopyButton value={connectCmd} label={`${t('common.copyConnectCmd')}: ${connectCmd}`} />
           </span>
         ) : null}
       </div>

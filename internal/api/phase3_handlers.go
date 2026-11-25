@@ -157,10 +157,19 @@ func (s *Server) handleListAllSchedules(c *gin.Context) {
 type schedulePayload struct {
 	ClusterID string         `json:"cluster_id" binding:"required"`
 	Name      string         `json:"name" binding:"required"`
-	TaskType  string         `json:"task_type" binding:"required"` // backup | restart | announce | update
+	TaskType  string         `json:"task_type" binding:"required"` // backup | restart | announce | update | mod_update
 	CronExpr  string         `json:"cron_expr" binding:"required"`
 	Params    map[string]any `json:"params"`
 	Enabled   bool           `json:"enabled"`
+}
+
+func isValidScheduleTaskType(taskType string) bool {
+	switch taskType {
+	case "backup", "restart", "announce", "update", "mod_update":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) authorizeScheduleCluster(c *gin.Context, clusterID string) bool {
@@ -184,16 +193,19 @@ func (s *Server) handleCreateSchedule(c *gin.Context) {
 		respondBindError(c, err)
 		return
 	}
-	if !s.authorizeScheduleCluster(c, req.ClusterID) {
-		respondCodeError(c, http.StatusForbidden, apperr.CodeInsufficientClusterPerm, "insufficient permission for target cluster")
-		return
-	}
-	if req.TaskType != "backup" && req.TaskType != "restart" && req.TaskType != "announce" && req.TaskType != "update" {
+	if !isValidScheduleTaskType(req.TaskType) {
 		respondCodeError(c, http.StatusBadRequest, apperr.CodeInvalidTaskType, "invalid task_type")
 		return
 	}
-	if req.TaskType == "update" && auth.CurrentUser(c).Role != db.RoleAdmin {
-		respondCodeError(c, http.StatusForbidden, apperr.CodeAdminRequiredForUpdate, "admin role required for server update tasks")
+	if req.TaskType == "update" {
+		if auth.CurrentUser(c).Role != db.RoleAdmin {
+			respondCodeError(c, http.StatusForbidden, apperr.CodeAdminRequiredForUpdate, "admin role required for server update tasks")
+			return
+		}
+		req.ClusterID = "*"
+	}
+	if !s.authorizeScheduleCluster(c, req.ClusterID) {
+		respondCodeError(c, http.StatusForbidden, apperr.CodeInsufficientClusterPerm, "insufficient permission for target cluster")
 		return
 	}
 	if err := s.cronSvc.ValidateExpr(req.CronExpr); err != nil {
@@ -235,6 +247,19 @@ func (s *Server) handleUpdateSchedule(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		respondBindError(c, err)
 		return
+	}
+	if !isValidScheduleTaskType(req.TaskType) {
+		respondCodeError(c, http.StatusBadRequest, apperr.CodeInvalidTaskType, "invalid task_type")
+		return
+	}
+	if req.TaskType == "update" || existing.TaskType == "update" {
+		if auth.CurrentUser(c).Role != db.RoleAdmin {
+			respondCodeError(c, http.StatusForbidden, apperr.CodeAdminRequiredForUpdate, "admin role required for server update tasks")
+			return
+		}
+		if req.TaskType == "update" {
+			req.ClusterID = "*"
+		}
 	}
 	if !s.authorizeScheduleCluster(c, existing.ClusterID) || !s.authorizeScheduleCluster(c, req.ClusterID) {
 		respondCodeError(c, http.StatusForbidden, apperr.CodeInsufficientPermission, "insufficient permission")

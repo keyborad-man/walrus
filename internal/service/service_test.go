@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -496,5 +498,339 @@ description = "本地描述"
 	cache2, err := store.GetModCache("workshop-378160973")
 	if err != nil || cache2.PreviewURL != "https://steam.example/preview/378160973.jpg" {
 		t.Fatalf("expected redownload to populate preview_url, got %+v err=%v", cache2, err)
+	}
+}
+
+func TestCronDSTUpdateCheckAndAutoUpgrade(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	// Mock Klei builds.json server returning build 700001.
+	buildsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"release": []string{"700000", "700001"},
+			"beta":    []string{"700002"},
+		})
+	}))
+	defer buildsSrv.Close()
+
+	// Capture webhook events.
+	var mu sync.Mutex
+	var events []string
+	whSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev WebhookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err == nil {
+			mu.Lock()
+			events = append(events, ev.Event)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whSrv.Close()
+
+	_, _ = store.CreateWebhook(&db.WebhookConfig{
+		Name:     "test-hook",
+		Template: "generic",
+		URL:      whSrv.URL,
+		Events:   []string{"*"},
+		Enabled:  true,
+	})
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		t.Fatalf("mkdir dstDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dstDir, "version.txt"), []byte("700000\n"), 0o644); err != nil {
+		t.Fatalf("write version.txt: %v", err)
+	}
+
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	steamMgr.SetBuildsURL(buildsSrv.URL)
+	clusterSvc := NewClusterService(store, fs, driver)
+	backupSvc := NewBackupService(filepath.Join(tmp, "backups"), store, fs, driver)
+	webhookSvc := NewWebhookService(store)
+	cronSvc := NewCronService(store, fs, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
+
+	if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:    "dst_upd_world",
+		ClusterName:  "DST Update World",
+		GameMode:     "endless",
+		CavesEnabled: false,
+	}); err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+	ctx := context.Background()
+	if err := clusterSvc.StartCluster(ctx, "dst_upd_world"); err != nil {
+		t.Fatalf("start cluster: %v", err)
+	}
+	defer func() { _ = clusterSvc.StopCluster(ctx, "dst_upd_world") }()
+	time.Sleep(1500 * time.Millisecond)
+
+	// 1. Notify-only mode should detect update, dispatch webhook, and NOT modify local version.
+	notifyTask, err := store.CreateScheduledTask(&db.ScheduledTask{
+		ClusterID:  "*",
+		Name:       "Check DST Version",
+		TaskType:   "update",
+		CronExpr:   "0 * * * *",
+		ParamsJSON: `{"auto_upgrade":false}`,
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create notify task: %v", err)
+	}
+	cronSvc.executeTaskByID(notifyTask.ID, true)
+
+	gotNotify, _ := store.GetScheduledTask(notifyTask.ID)
+	if !strings.Contains(gotNotify.LastStatus, "notify only") {
+		t.Fatalf("expected notify only status, got %q", gotNotify.LastStatus)
+	}
+	if steamMgr.LocalVersion() != "700000" {
+		t.Fatalf("expected local version unchanged in notify-only mode, got %q", steamMgr.LocalVersion())
+	}
+
+	// 2. Auto-upgrade with pre-update backup should stop, backup, update to 700001, and restart.
+	autoTask, err := store.CreateScheduledTask(&db.ScheduledTask{
+		ClusterID:  "*",
+		Name:       "Auto Upgrade DST",
+		TaskType:   "update",
+		CronExpr:   "0 4 * * *",
+		ParamsJSON: `{"auto_upgrade":true,"only_when_empty":false,"countdown_sec":0,"backup_before_update":true}`,
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create auto task: %v", err)
+	}
+	cronSvc.executeTaskByID(autoTask.ID, true)
+
+	gotAuto, _ := store.GetScheduledTask(autoTask.ID)
+	if gotAuto.LastStatus != "updated to 700001" {
+		t.Fatalf("expected 'updated to 700001', got %q", gotAuto.LastStatus)
+	}
+	if steamMgr.LocalVersion() != "700001" {
+		t.Fatalf("expected local version updated to 700001, got %q", steamMgr.LocalVersion())
+	}
+	backups, err := backupSvc.ListBackups("dst_upd_world")
+	if err != nil || len(backups) != 1 || backups[0].Trigger != "pre_update" {
+		t.Fatalf("expected 1 pre_update backup, got %+v err=%v", backups, err)
+	}
+	// Cluster should be restarted.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if driver.GetShardStatus("dst_upd_world", "master").State == runtime.StateRunning {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st := driver.GetShardStatus("dst_upd_world", "master"); st.State != runtime.StateRunning {
+		t.Fatalf("expected cluster restarted after DST upgrade, got %+v", st)
+	}
+
+	// 3. Running again when up to date should report up to date.
+	cronSvc.executeTaskByID(autoTask.ID, true)
+	gotAuto2, _ := store.GetScheduledTask(autoTask.ID)
+	if gotAuto2.LastStatus != "up to date (700001)" {
+		t.Fatalf("expected 'up to date (700001)', got %q", gotAuto2.LastStatus)
+	}
+
+	// Verify both webhook events arrived.
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	joined := strings.Join(events, ",")
+	mu.Unlock()
+	if !strings.Contains(joined, "steam.update_available") || !strings.Contains(joined, "steam.update_complete") {
+		t.Fatalf("expected steam update webhooks, got %q", joined)
+	}
+}
+
+func TestCronModUpdateCheckAndAutoUpgrade(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	// Mock Steam Workshop GetPublishedFileDetails returning time_updated = 1800000000.
+	wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{
+				"publishedfiledetails": []map[string]any{
+					{
+						"publishedfileid": "378160973",
+						"result":          1,
+						"title":           "Global Positions",
+						"description":     "Map share",
+						"preview_url":     "https://steam.example/preview/378160973.jpg",
+						"time_updated":    1800000000,
+					},
+				},
+			},
+		})
+	}))
+	defer wsSrv.Close()
+
+	var mu sync.Mutex
+	var events []string
+	whSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev WebhookEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err == nil {
+			mu.Lock()
+			events = append(events, ev.Event)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whSrv.Close()
+
+	_, _ = store.CreateWebhook(&db.WebhookConfig{
+		Name:     "mod-hook",
+		Template: "generic",
+		URL:      whSrv.URL,
+		Events:   []string{"*"},
+		Enabled:  true,
+	})
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	localModsDir := filepath.Join(tmp, "local-mods")
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	workshop := steam.NewWorkshopClient("linux")
+	workshop.SetDetailsEndpoint(wsSrv.URL)
+	modSvc := NewModService(dstDir, localModsDir, store, fs, steamMgr, workshop)
+	clusterSvc := NewClusterService(store, fs, driver)
+	clusterSvc.SetModService(modSvc)
+	backupSvc := NewBackupService(filepath.Join(tmp, "backups"), store, fs, driver)
+	webhookSvc := NewWebhookService(store)
+	cronSvc := NewCronService(store, fs, driver, clusterSvc, backupSvc, steamMgr, webhookSvc)
+	cronSvc.SetModService(modSvc)
+
+	// Create two clusters: c1 enables workshop-378160973, c2 has no workshop mods.
+	for _, cid := range []string{"c1", "c2"} {
+		if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+			ClusterID:    cid,
+			ClusterName:  cid,
+			GameMode:     "endless",
+			CavesEnabled: false,
+		}); err != nil {
+			t.Fatalf("create cluster %s: %v", cid, err)
+		}
+	}
+	if err := fs.WriteModOverrides("c1", "master", `return {
+  ["workshop-378160973"] = { enabled = true, configuration_options = {} },
+}`); err != nil {
+		t.Fatalf("write c1 modoverrides: %v", err)
+	}
+
+	// Stage locally installed older version of workshop-378160973.
+	modDir := filepath.Join(dstDir, "mods", "workshop-378160973")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatalf("mkdir mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "modinfo.lua"), []byte(`name = "Global Positions"
+version = "1.7.0"`), 0o644); err != nil {
+		t.Fatalf("write modinfo: %v", err)
+	}
+	// Even if TimeUpdated was already touched (e.g. by preview backfill), InstalledTimeUpdated governs update detection.
+	if err := store.UpsertModCache(&db.ModCache{
+		ModID:                "workshop-378160973",
+		WorkshopID:           "378160973",
+		Name:                 "Global Positions",
+		TimeUpdated:          1800000000,
+		InstalledTimeUpdated: 1700000000,
+	}); err != nil {
+		t.Fatalf("upsert mod cache: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := clusterSvc.StartCluster(ctx, "c1"); err != nil {
+		t.Fatalf("start c1: %v", err)
+	}
+	defer func() { _ = clusterSvc.StopCluster(ctx, "c1") }()
+	time.Sleep(1500 * time.Millisecond)
+
+	// 1. Notify-only mode should report 1 mod update available without touching installed_time_updated.
+	notifyTask, err := store.CreateScheduledTask(&db.ScheduledTask{
+		ClusterID:  "c1",
+		Name:       "Check Mods",
+		TaskType:   "mod_update",
+		CronExpr:   "0 * * * *",
+		ParamsJSON: `{"auto_upgrade":false}`,
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create mod notify task: %v", err)
+	}
+	cronSvc.executeTaskByID(notifyTask.ID, true)
+	gotNotify, _ := store.GetScheduledTask(notifyTask.ID)
+	if !strings.Contains(gotNotify.LastStatus, "updates available (1 mod(s), notify only)") {
+		t.Fatalf("expected notify-only mod status, got %q", gotNotify.LastStatus)
+	}
+	cacheBefore, _ := store.GetModCache("workshop-378160973")
+	if cacheBefore.InstalledTimeUpdated != 1700000000 {
+		t.Fatalf("expected InstalledTimeUpdated unchanged, got %d", cacheBefore.InstalledTimeUpdated)
+	}
+
+	// 2. Auto-upgrade with backup should backup c1 (not c2), update mod, refresh InstalledTimeUpdated, and restart c1.
+	autoTask, err := store.CreateScheduledTask(&db.ScheduledTask{
+		ClusterID:  "c1",
+		Name:       "Auto Update Mods",
+		TaskType:   "mod_update",
+		CronExpr:   "0 */6 * * *",
+		ParamsJSON: `{"auto_upgrade":true,"only_when_empty":false,"countdown_sec":0,"backup_before_update":true}`,
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("create mod auto task: %v", err)
+	}
+	cronSvc.executeTaskByID(autoTask.ID, true)
+	gotAuto, _ := store.GetScheduledTask(autoTask.ID)
+	if gotAuto.LastStatus != "updated 1 mod(s), restarted 1 cluster(s)" {
+		t.Fatalf("unexpected auto mod update status: %q", gotAuto.LastStatus)
+	}
+	cacheAfter, _ := store.GetModCache("workshop-378160973")
+	if cacheAfter.InstalledTimeUpdated != 1800000000 {
+		t.Fatalf("expected InstalledTimeUpdated=1800000000, got %d", cacheAfter.InstalledTimeUpdated)
+	}
+
+	c1Backups, _ := backupSvc.ListBackups("c1")
+	c2Backups, _ := backupSvc.ListBackups("c2")
+	if len(c1Backups) != 1 || c1Backups[0].Trigger != "pre_update" {
+		t.Fatalf("expected 1 pre_update backup for c1, got %+v", c1Backups)
+	}
+	if len(c2Backups) != 0 {
+		t.Fatalf("expected 0 backups for unaffected c2, got %+v", c2Backups)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if driver.GetShardStatus("c1", "master").State == runtime.StateRunning {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if st := driver.GetShardStatus("c1", "master"); st.State != runtime.StateRunning {
+		t.Fatalf("expected c1 restarted after mod update, got %+v", st)
+	}
+
+	// 3. Running again when up to date should report up to date.
+	cronSvc.executeTaskByID(autoTask.ID, true)
+	gotAuto2, _ := store.GetScheduledTask(autoTask.ID)
+	if gotAuto2.LastStatus != "up to date (1 mod(s))" {
+		t.Fatalf("expected 'up to date (1 mod(s))', got %q", gotAuto2.LastStatus)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	joined := strings.Join(events, ",")
+	mu.Unlock()
+	if !strings.Contains(joined, "mod.update_available") || !strings.Contains(joined, "mod.update_complete") {
+		t.Fatalf("expected mod update webhooks, got %q", joined)
 	}
 }

@@ -68,6 +68,16 @@ func (s *Server) handleSystemMetrics(c *gin.Context) {
 	})
 }
 
+func (s *Server) handleSystemPublicIP(c *gin.Context) {
+	ip := ""
+	if s.publicIP != nil {
+		ip = s.publicIP.Get(c.Request.Context())
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ip": ip,
+	})
+}
+
 func (s *Server) handleGetSettings(c *gin.Context) {
 	st, err := s.store.GetSystemSettings(false)
 	if err != nil {

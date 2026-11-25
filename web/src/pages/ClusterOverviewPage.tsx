@@ -27,7 +27,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { cn, formatUptime } from '@/lib/utils'
-import { formatCharacterName } from '@/lib/dst'
+import { formatCharacterName, formatConnectCommand } from '@/lib/dst'
 import { useAuth } from '@/hooks/useAuth'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -67,8 +67,15 @@ export function ClusterOverviewPage() {
     refetchInterval: 3000,
     enabled: !!id,
   })
+  const { data: publicIpData } = useQuery({
+    queryKey: ['system-public-ip'],
+    queryFn: api.publicIP,
+    staleTime: 10 * 60 * 1000,
+    retry: false,
+  })
 
   const cluster = data?.cluster
+  const connectHost = publicIpData?.ip || window.location.hostname
   const effRole = data?.effective_role
   const canOperate = effRole === 'admin' || effRole === 'operator'
   const isAdmin = user?.role === 'admin'
@@ -393,6 +400,15 @@ export function ClusterOverviewPage() {
                   icon={<Trees className="h-3.5 w-3.5 text-muted-foreground" />}
                   title={t('common.masterShort')}
                   port={cluster.master_server_ini.server_port}
+                  connectCmd={
+                    cluster.master_server_ini.server_port > 0
+                      ? formatConnectCommand(
+                          connectHost,
+                          cluster.master_server_ini.server_port,
+                          cluster.cluster_ini.cluster_password,
+                        )
+                      : undefined
+                  }
                   status={cluster.master_status}
                 />
 
@@ -429,6 +445,15 @@ export function ClusterOverviewPage() {
                   icon={<Mountain className="h-3.5 w-3.5 text-muted-foreground" />}
                   title={t('common.cavesShort')}
                   port={cluster.caves_server_ini?.server_port ?? 0}
+                  connectCmd={
+                    (cluster.caves_server_ini?.server_port ?? 0) > 0
+                      ? formatConnectCommand(
+                          connectHost,
+                          cluster.caves_server_ini!.server_port,
+                          cluster.cluster_ini.cluster_password,
+                        )
+                      : undefined
+                  }
                   status={cluster.caves_status}
                 />
               </div>
@@ -438,6 +463,15 @@ export function ClusterOverviewPage() {
                   icon={<Trees className="h-3.5 w-3.5 text-muted-foreground" />}
                   title={t('common.masterShort')}
                   port={cluster.master_server_ini.server_port}
+                  connectCmd={
+                    cluster.master_server_ini.server_port > 0
+                      ? formatConnectCommand(
+                          connectHost,
+                          cluster.master_server_ini.server_port,
+                          cluster.cluster_ini.cluster_password,
+                        )
+                      : undefined
+                  }
                   status={cluster.master_status}
                 />
                 <div className="rounded-lg border border-dashed border-border px-3.5 py-3 text-xs text-muted-foreground leading-relaxed text-pretty">
@@ -457,6 +491,15 @@ export function ClusterOverviewPage() {
           icon={<Trees className="h-4 w-4 text-muted-foreground" />}
           status={cluster.master_status}
           port={cluster.master_server_ini.server_port}
+          connectCmd={
+            cluster.master_server_ini.server_port > 0
+              ? formatConnectCommand(
+                  connectHost,
+                  cluster.master_server_ini.server_port,
+                  cluster.cluster_ini.cluster_password,
+                )
+              : undefined
+          }
           canOperate={canOperate}
           busy={busyTarget === 'all' || busyTarget === 'master'}
           restarting={(busyTarget === 'all' || busyTarget === 'master') && restartMut.isPending}
@@ -471,6 +514,15 @@ export function ClusterOverviewPage() {
             icon={<Mountain className="h-4 w-4 text-muted-foreground" />}
             status={cluster.caves_status}
             port={cluster.caves_server_ini?.server_port ?? 0}
+            connectCmd={
+              (cluster.caves_server_ini?.server_port ?? 0) > 0
+                ? formatConnectCommand(
+                    connectHost,
+                    cluster.caves_server_ini!.server_port,
+                    cluster.cluster_ini.cluster_password,
+                  )
+                : undefined
+            }
             canOperate={canOperate}
             busy={busyTarget === 'all' || busyTarget === 'caves'}
             restarting={(busyTarget === 'all' || busyTarget === 'caves') && restartMut.isPending}
@@ -674,13 +726,16 @@ function TopologyNode({
   icon,
   title,
   port,
+  connectCmd,
   status,
 }: {
   icon: React.ReactNode
   title: string
   port: number
+  connectCmd?: string
   status: ShardStatus
 }) {
+  const { t } = useTranslation()
   const active = status.state === 'running' || status.state === 'starting'
   return (
     <div className="rounded-lg border border-border bg-[var(--surface-elevated)]/55 p-3 space-y-2">
@@ -694,7 +749,7 @@ function TopologyNode({
       <div className="flex items-center justify-between gap-2 text-[11.5px] font-mono tabular-nums text-muted-foreground">
         <span className="inline-flex items-center gap-0.5 text-foreground">
           :{port || '-'}
-          {port > 0 && <CopyButton value={String(port)} />}
+          {connectCmd && <CopyButton value={connectCmd} label={`${t('common.copyConnectCmd')}: ${connectCmd}`} />}
         </span>
         <span>{active ? `${status.cpu_percent}% · ${Math.round(status.memory_mb)} MB` : '—'}</span>
       </div>
@@ -708,6 +763,7 @@ function ShardCard({
   icon,
   status,
   port,
+  connectCmd,
   canOperate,
   busy,
   restarting,
@@ -720,6 +776,7 @@ function ShardCard({
   icon: React.ReactNode
   status: ShardStatus
   port: number
+  connectCmd?: string
   canOperate: boolean
   busy: boolean
   restarting: boolean
@@ -747,7 +804,7 @@ function ShardCard({
             <div className="text-[11px] text-muted-foreground">{t('overview.port')}</div>
             <div className="mt-1 font-mono font-medium text-foreground flex items-center gap-0.5">
               <span>{port || '-'}</span>
-              {port > 0 && <CopyButton value={String(port)} />}
+              {connectCmd && <CopyButton value={connectCmd} label={`${t('common.copyConnectCmd')}: ${connectCmd}`} />}
             </div>
           </div>
           <div>
