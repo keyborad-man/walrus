@@ -11,6 +11,7 @@ import { AppShell } from '@/components/AppShell'
 import { SetupPage } from '@/pages/SetupPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { CreateClusterPage } from '@/pages/CreateClusterPage'
 import { ClusterOverviewPage } from '@/pages/ClusterOverviewPage'
 import { ClusterConsolePage } from '@/pages/ClusterConsolePage'
 import { ClusterConfigPage } from '@/pages/ClusterConfigPage'
@@ -109,6 +110,14 @@ const router = createBrowserRouter([
         ),
         children: [
           { path: '/', element: <DashboardPage /> },
+          {
+            path: '/clusters/new',
+            element: (
+              <RequireAdmin>
+                <CreateClusterPage />
+              </RequireAdmin>
+            ),
+          },
           { path: '/clusters/:id/overview', element: <ClusterOverviewPage /> },
           { path: '/clusters/:id/console', element: <ClusterConsolePage /> },
           { path: '/clusters/:id/config', element: <ClusterConfigPage /> },

@@ -114,6 +114,7 @@ func (s *Server) Engine() *gin.Engine {
 			authed.GET("/system/public-ip", s.handleSystemPublicIP)
 			authed.GET("/system/version", s.handleSystemVersion)
 			authed.GET("/presets", s.handleListPresets)
+			authed.GET("/world-schema", s.handleWorldSchema)
 			authed.GET("/steam/status", s.handleSteamStatus)
 
 			// Workshop & Mod Library (read/search available to all authenticated users; upload/delete admin)

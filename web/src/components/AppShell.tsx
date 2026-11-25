@@ -190,6 +190,7 @@ export function AppShell() {
   const currentPageLabel = (() => {
     const p = location.pathname
     if (p === '/') return t('nav.dashboard')
+    if (p === '/clusters/new') return t('createWorld.pageTitle')
     if (p.endsWith('/overview')) return t('nav.overview')
     if (p.endsWith('/console')) return t('nav.console')
     if (p.endsWith('/config')) return t('nav.config')

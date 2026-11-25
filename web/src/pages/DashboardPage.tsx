@@ -26,7 +26,6 @@ import { Sparkline } from '@/components/ui/sparkline'
 import { DashboardSkeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/PageHeader'
 import { DSTClockDial, ShardStateBadge } from '@/components/StatusBadge'
-import { CreateClusterDialog } from '@/components/CreateClusterDialog'
 import { ImportClusterDialog } from '@/components/ImportClusterDialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { QueryErrorCard } from '@/components/QueryErrorCard'
@@ -50,7 +49,6 @@ export function DashboardPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
 
-  const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [clusterFilter, setClusterFilter] = useState<ClusterFilter>('all')
   const [busyClusterId, setBusyClusterId] = useState<string | null>(null)
@@ -265,7 +263,7 @@ export function DashboardPage() {
                   <Upload className="h-3.5 w-3.5" />
                   {t('importCluster.btn')}
                 </Button>
-                <Button onClick={() => setCreateOpen(true)}>
+                <Button onClick={() => navigate('/clusters/new')}>
                   <Plus className="h-3.5 w-3.5" />
                   {t('dashboard.createCluster')}
                 </Button>
@@ -442,7 +440,7 @@ export function DashboardPage() {
                       <Download className="h-3.5 w-3.5" />
                       {t('dashboard.goSteamSetup')}
                     </Link>
-                    <Button variant="outline" onClick={() => setCreateOpen(true)}>
+                    <Button variant="outline" onClick={() => navigate('/clusters/new')}>
                       <Plus className="h-3.5 w-3.5" />
                       {t('dashboard.createCluster')}
                     </Button>
@@ -453,7 +451,7 @@ export function DashboardPage() {
                   </>
                 ) : (
                   <>
-                    <Button onClick={() => setCreateOpen(true)}>
+                    <Button onClick={() => navigate('/clusters/new')}>
                       <Plus className="h-3.5 w-3.5" />
                       {t('dashboard.createCluster')}
                     </Button>
@@ -749,11 +747,6 @@ export function DashboardPage() {
         </section>
       )}
 
-      <CreateClusterDialog
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        onCreated={(cid) => navigate(`/clusters/${encodeURIComponent(cid)}/overview`)}
-      />
       <ImportClusterDialog
         open={importOpen}
         onClose={() => setImportOpen(false)}

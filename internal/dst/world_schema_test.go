@@ -11,18 +11,19 @@ func TestWorldSchemaIntegrityAndClientOrder(t *testing.T) {
 		{
 			shard: "master",
 			wantGroups: []string{
-				"settings_global", "settings_survivors", "settings_misc", "settings_resources", "settings_giants",
+				"settings_global", "settings_events", "settings_survivors", "settings_misc", "settings_resources",
+				"settings_portal_resources", "settings_animals", "settings_monsters", "settings_giants", "settings_lunar_mutations",
 				"worldgen_global", "worldgen_misc", "worldgen_resources", "worldgen_animals", "worldgen_monsters",
 			},
-			wantOptCount: 63,
+			wantOptCount: 190,
 		},
 		{
 			shard: "caves",
 			wantGroups: []string{
-				"settings_misc", "settings_resources", "settings_giants",
+				"settings_misc", "settings_resources", "settings_animals", "settings_monsters", "settings_giants", "settings_lunar_mutations",
 				"worldgen_misc", "worldgen_resources", "worldgen_animals", "worldgen_monsters",
 			},
-			wantOptCount: 25,
+			wantOptCount: 88,
 		},
 	}
 

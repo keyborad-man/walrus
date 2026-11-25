@@ -834,3 +834,69 @@ version = "1.7.0"`), 0o644); err != nil {
 		t.Fatalf("expected mod update webhooks, got %q", joined)
 	}
 }
+
+func TestCreateClusterWithCustomWorldOverridesAndNetworkMode(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	clusterSvc := NewClusterService(store, fs, driver)
+
+	detail, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:      "custom_dst_world",
+		ClusterName:    "Custom DST World",
+		GameMode:       "endless",
+		MaxPlayers:     8,
+		OfflineCluster: true,
+		LanOnlyCluster: true,
+		CavesEnabled:   true,
+		MasterPreset:   "endless",
+		MasterOverrides: map[string]any{
+			"world_size":         "huge",
+			"year_of_the_knight": "enabled",
+			"day":                "longday",
+		},
+		CavesOverrides: map[string]any{
+			"world_size":       "medium",
+			"acidrain_enabled": "none",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+	if !detail.ClusterINI.OfflineCluster || !detail.ClusterINI.LanOnlyCluster {
+		t.Fatalf("expected offline and lan_only flags set, got %+v", detail.ClusterINI)
+	}
+
+	masterView, err := clusterSvc.ReadWorldConfig("custom_dst_world", "master")
+	if err != nil {
+		t.Fatalf("read master world: %v", err)
+	}
+	if masterView.Parsed == nil {
+		t.Fatal("expected parsed master leveldata")
+	}
+	if masterView.Parsed.Overrides["world_size"] != "huge" ||
+		masterView.Parsed.Overrides["year_of_the_knight"] != "enabled" ||
+		masterView.Parsed.Overrides["day"] != "longday" {
+		t.Fatalf("unexpected master overrides: %+v", masterView.Parsed.Overrides)
+	}
+	// Preserve preset baseline overrides alongside custom patches
+	if masterView.Parsed.Overrides["portalresurection"] != "always" {
+		t.Fatalf("expected endless preset baseline portalresurection=always preserved, got %v", masterView.Parsed.Overrides["portalresurection"])
+	}
+
+	cavesView, err := clusterSvc.ReadWorldConfig("custom_dst_world", "caves")
+	if err != nil {
+		t.Fatalf("read caves world: %v", err)
+	}
+	if cavesView.Parsed == nil ||
+		cavesView.Parsed.Overrides["world_size"] != "medium" ||
+		cavesView.Parsed.Overrides["acidrain_enabled"] != "none" {
+		t.Fatalf("unexpected caves overrides: %+v", cavesView.Parsed)
+	}
+}

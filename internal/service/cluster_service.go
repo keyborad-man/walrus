@@ -47,19 +47,24 @@ type ClusterDetail struct {
 }
 
 type CreateClusterRequest struct {
-	ClusterID          string `json:"cluster_id" binding:"required"`
-	ClusterName        string `json:"cluster_name" binding:"required"`
-	ClusterDescription string `json:"cluster_description"`
-	ClusterPassword    string `json:"cluster_password"`
-	GameMode           string `json:"game_mode"`
-	MaxPlayers         int    `json:"max_players"`
-	PVP                bool   `json:"pvp"`
-	PauseWhenEmpty     *bool  `json:"pause_when_empty"`
-	ClusterIntention   string `json:"cluster_intention"`
-	CavesEnabled       bool   `json:"caves_enabled"`
-	MasterPreset       string `json:"master_preset"`
-	ClusterToken       string `json:"cluster_token"`
-	AutoRestart        *bool  `json:"auto_restart"`
+	ClusterID          string         `json:"cluster_id" binding:"required"`
+	ClusterName        string         `json:"cluster_name" binding:"required"`
+	ClusterDescription string         `json:"cluster_description"`
+	ClusterPassword    string         `json:"cluster_password"`
+	GameMode           string         `json:"game_mode"`
+	MaxPlayers         int            `json:"max_players"`
+	PVP                bool           `json:"pvp"`
+	PauseWhenEmpty     *bool          `json:"pause_when_empty"`
+	ClusterIntention   string         `json:"cluster_intention"`
+	OfflineCluster     bool           `json:"offline_cluster"`
+	LanOnlyCluster     bool           `json:"lan_only_cluster"`
+	CavesEnabled       bool           `json:"caves_enabled"`
+	MasterPreset       string         `json:"master_preset"`
+	CavesPreset        string         `json:"caves_preset"`
+	MasterOverrides    map[string]any `json:"master_overrides"`
+	CavesOverrides     map[string]any `json:"caves_overrides"`
+	ClusterToken       string         `json:"cluster_token"`
+	AutoRestart        *bool          `json:"auto_restart"`
 }
 
 type UpdateClusterConfigRequest struct {
@@ -257,6 +262,8 @@ func (s *ClusterService) CreateCluster(req CreateClusterRequest) (*ClusterDetail
 	if req.ClusterIntention != "" {
 		ci.ClusterIntention = req.ClusterIntention
 	}
+	ci.OfflineCluster = req.OfflineCluster
+	ci.LanOnlyCluster = req.LanOnlyCluster
 
 	if err := s.fs.WriteClusterINI(req.ClusterID, &ci); err != nil {
 		return nil, err
@@ -279,7 +286,15 @@ func (s *ClusterService) CreateCluster(req CreateClusterRequest) (*ClusterDetail
 	if presetID == "" {
 		presetID = ci.GameMode
 	}
-	if err := s.fs.WriteLevelData(req.ClusterID, "master", dst.PresetLuaByID(presetID, "master")); err != nil {
+	masterLua := dst.PresetLuaByID(presetID, "master")
+	if len(req.MasterOverrides) > 0 {
+		patched, err := lua.PatchLevelOverrides(masterLua, req.MasterOverrides, false)
+		if err != nil {
+			return nil, err
+		}
+		masterLua = patched
+	}
+	if err := s.fs.WriteLevelData(req.ClusterID, "master", masterLua); err != nil {
 		return nil, err
 	}
 	if err := s.fs.WriteModOverrides(req.ClusterID, "master", dst.DefaultModOverridesLua); err != nil {
@@ -299,7 +314,19 @@ func (s *ClusterService) CreateCluster(req CreateClusterRequest) (*ClusterDetail
 		if err := s.fs.WriteServerINI(req.ClusterID, "caves", cavesINI); err != nil {
 			return nil, err
 		}
-		if err := s.fs.WriteLevelData(req.ClusterID, "caves", dst.PresetLuaByID("caves_default", "caves")); err != nil {
+		cavesPresetID := req.CavesPreset
+		if cavesPresetID == "" {
+			cavesPresetID = "caves_default"
+		}
+		cavesLua := dst.PresetLuaByID(cavesPresetID, "caves")
+		if len(req.CavesOverrides) > 0 {
+			patched, err := lua.PatchLevelOverrides(cavesLua, req.CavesOverrides, false)
+			if err != nil {
+				return nil, err
+			}
+			cavesLua = patched
+		}
+		if err := s.fs.WriteLevelData(req.ClusterID, "caves", cavesLua); err != nil {
 			return nil, err
 		}
 		if err := s.fs.WriteModOverrides(req.ClusterID, "caves", dst.DefaultModOverridesLua); err != nil {

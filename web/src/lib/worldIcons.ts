@@ -89,9 +89,65 @@ const WORLD_ICON_FILES = new Set<string>([
   'daywalker',
 ])
 
+const WORLD_ICON_ALIASES: Record<string, string> = {
+  // World Settings counterparts that share art with World Generation / existing icons
+  spiders_setting: 'spiders',
+  pigs_setting: 'pigs',
+  rabbits_setting: 'rabbits',
+  bees_setting: 'bees',
+  bats_setting: 'bats',
+  walrus_setting: 'walrus',
+  merms: 'merm',
+  catcoons: 'catcoon',
+  bunnymen_setting: 'bunnymen',
+  slurtles_setting: 'slurtles',
+  rocky_setting: 'rocky',
+  monkey_setting: 'monkey',
+  hound_mounds: 'hounds',
+  houndmound: 'hounds',
+  cave_ponds: 'ponds',
+  evergreen_regrowth: 'trees',
+  flowers_regrowth: 'flowers',
+  carrots_regrowth: 'carrot',
+  reeds_regrowth: 'reeds',
+  cactus_regrowth: 'cactus',
+  flower_cave_regrowth: 'flower_cave',
+  mushtree_regrowth: 'mushtree',
+  meteorshowers: 'meteorspawner',
+  alternatehunt: 'hunt',
+  winterhounds: 'hounds',
+  summerhounds: 'hounds',
+  wormattacks_boss: 'wormattacks',
+  mutated_hounds: 'hounds',
+  mutated_merm: 'merm',
+  mutated_deerclops: 'deerclops',
+  mutated_bearger: 'bearger',
+  daywalker2: 'daywalker',
+  moon_spiders: 'spiders',
+  moon_spider: 'spiders',
+  moon_carrot: 'carrot',
+  moon_tree: 'trees',
+  moon_tree_regrowth: 'trees',
+  moon_sapling: 'sapling',
+  moon_berrybush: 'berrybush',
+  moon_rock: 'rock',
+  twiggytrees_regrowth: 'trees',
+  deciduoustree_regrowth: 'trees',
+  mushtree_moon_regrowth: 'mushtree',
+  angrybees: 'bees',
+  wasps: 'bees',
+  frogs: 'frograin',
+}
+
 const ICON_BASE = '/world-icons/'
 
 export function getWorldOptionIcon(key: string): string | null {
-  if (!WORLD_ICON_FILES.has(key)) return null
-  return `${ICON_BASE}${key}.png`
+  if (WORLD_ICON_FILES.has(key)) {
+    return `${ICON_BASE}${key}.png`
+  }
+  const alias = WORLD_ICON_ALIASES[key]
+  if (alias && WORLD_ICON_FILES.has(alias)) {
+    return `${ICON_BASE}${alias}.png`
+  }
+  return null
 }

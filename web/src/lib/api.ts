@@ -29,6 +29,7 @@ import type {
   WorldConfigView,
   WorldPreset,
   WorldRuntimeInfo,
+  WorldSchemasResponse,
 } from '@/types/api'
 
 import { ApiError, buildApiError } from '@/lib/errors'
@@ -115,6 +116,7 @@ export const api = {
       body: JSON.stringify(target_image ? { target_image } : {}),
     }),
   presets: () => request<{ presets: WorldPreset[] }>('/api/v1/presets'),
+  worldSchema: () => request<WorldSchemasResponse>('/api/v1/world-schema'),
   getSettings: () =>
     request<{ settings: SystemSettings; runtime_mode: string; data_dir: string }>(
       '/api/v1/system/settings',
@@ -174,8 +176,13 @@ export const api = {
     pvp: boolean
     pause_when_empty: boolean
     cluster_intention: string
+    offline_cluster?: boolean
+    lan_only_cluster?: boolean
     caves_enabled: boolean
     master_preset: string
+    caves_preset?: string
+    master_overrides?: Record<string, unknown>
+    caves_overrides?: Record<string, unknown>
     cluster_token?: string
     auto_restart: boolean
   }) =>

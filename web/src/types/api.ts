@@ -321,6 +321,11 @@ export interface WorldConfigView {
   schema: WorldOptionGroup[]
 }
 
+export interface WorldSchemasResponse {
+  master: WorldOptionGroup[]
+  caves: WorldOptionGroup[]
+}
+
 export interface ModOptionChoice {
   description: string
   data: unknown

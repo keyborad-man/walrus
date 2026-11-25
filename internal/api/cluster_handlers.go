@@ -38,6 +38,13 @@ func (s *Server) handleListPresets(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"presets": dst.BuiltinPresets})
 }
 
+func (s *Server) handleWorldSchema(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"master": dst.WorldSchema("master"),
+		"caves":  dst.WorldSchema("caves"),
+	})
+}
+
 func (s *Server) handleCreateCluster(c *gin.Context) {
 	var req service.CreateClusterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
