@@ -183,6 +183,7 @@ export function ClusterOverviewPage() {
   const hasWorldClock = Boolean(
     cluster.world_info.season && cluster.world_info.season !== 'unknown' && cluster.world_info.day > 0,
   )
+  const seasonColor = `var(--season-${['winter', 'spring', 'summer'].includes(cluster.world_info.season) ? cluster.world_info.season : 'autumn'})`
   const showSeparateId = Boolean(
     cluster.cluster_ini.cluster_name && cluster.cluster_ini.cluster_name !== cluster.cluster_id,
   )
@@ -322,20 +323,29 @@ export function ClusterOverviewPage() {
       <section className="rounded-[10px] surface-card overflow-hidden">
         <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-border">
           {/* Left: World Clock */}
-          <div className="lg:col-span-5 p-5 flex flex-col justify-between gap-4">
+          <div className="relative lg:col-span-5 p-5 flex flex-col justify-between gap-4">
+            {hasWorldClock && (
+              <span
+                aria-hidden="true"
+                className="absolute left-0 top-5 bottom-5 w-[3px] rounded-r-full"
+                style={{ background: seasonColor }}
+              />
+            )}
             <div className="text-xs text-muted-foreground">{t('overview.worldClockTitle')}</div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-5">
               <DSTClockHeroDial
                 day={hasWorldClock ? cluster.world_info.day : undefined}
                 phase={cluster.world_info.phase}
                 season={cluster.world_info.season}
-                className="h-20 w-20 shrink-0"
+                className="h-24 w-24 sm:h-28 sm:w-28 shrink-0"
               />
               <div className="min-w-0 space-y-1.5 flex-1">
                 {hasWorldClock ? (
                   <>
                     <div className="text-lg font-semibold tracking-[-0.02em] text-foreground tabular-nums">
-                      {t(`dashboard.seasons.${cluster.world_info.season}`, cluster.world_info.season)}
+                      <span style={{ color: seasonColor }}>
+                        {t(`dashboard.seasons.${cluster.world_info.season}`, cluster.world_info.season)}
+                      </span>
                       <span className="mx-1.5 text-muted-foreground font-normal">·</span>
                       {t('dashboard.day', { day: cluster.world_info.day })}
                     </div>

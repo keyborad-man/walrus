@@ -90,7 +90,7 @@ export function LoginPage() {
         <div className="w-full max-w-[348px] space-y-7">
           {/* Lead: emblem + heading */}
           <div className="flex flex-col items-center text-center space-y-4 auth-enter-lead">
-            <div className="auth-logo-badge flex h-11 w-11 items-center justify-center rounded-xl border border-[var(--border-strong)] bg-foreground text-background dark:bg-[#16161a] dark:text-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
+            <div className="auth-logo-badge flex h-11 w-11 items-center justify-center rounded-xl bg-ember text-primary-foreground shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]">
               <WalrusLogo className="h-6 w-6" />
             </div>
             <div className="space-y-1.5">

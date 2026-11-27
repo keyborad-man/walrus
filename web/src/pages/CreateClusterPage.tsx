@@ -367,14 +367,14 @@ export function CreateClusterPage() {
                   className={cn(
                     'group relative flex flex-col rounded-xl border p-3.5 text-left transition-all duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                     active
-                      ? 'border-foreground/50 bg-secondary/45 ring-2 ring-foreground/15 shadow-sm -translate-y-0.5'
+                      ? 'border-ember bg-secondary/45 ring-2 ring-ember/20 shadow-sm -translate-y-0.5'
                       : 'border-border bg-card hover:border-border-strong hover:bg-secondary/25',
                   )}
                 >
                   {/* Visual Crest Area */}
                   <div
                     className={cn(
-                      'relative flex h-28 w-full flex-col items-center justify-center rounded-lg border bg-gradient-to-b mb-3 overflow-hidden',
+                      'relative flex h-28 w-full flex-col items-center justify-center rounded-lg border mb-3 overflow-hidden',
                       style.accentClass,
                     )}
                   >
@@ -385,12 +385,9 @@ export function CreateClusterPage() {
                         active ? 'scale-110 text-foreground' : 'text-foreground/75 group-hover:scale-105',
                       )}
                     />
-                    <span className="mt-2 text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
-                      {style.nameEn}
-                    </span>
 
                     {active && (
-                      <span className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-xs">
+                      <span className="absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-full bg-ember text-primary-foreground shadow-xs">
                         <Check className="h-3 w-3" />
                       </span>
                     )}
@@ -523,7 +520,7 @@ export function CreateClusterPage() {
             <div className="flex items-center gap-3 min-w-0">
               <div
                 className={cn(
-                  'flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border bg-gradient-to-b',
+                  'flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border',
                   selectedPlaystyle.accentClass,
                 )}
               >

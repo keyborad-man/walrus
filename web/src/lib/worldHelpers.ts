@@ -33,7 +33,7 @@ export const PLAYSTYLES: PlaystyleDefinition[] = [
       'A more relaxed playstyle with fewer threats from the world. Hunger, freezing, overheating, and darkness will not kill survivors. Damage taken is reduced, and you can always revive at the Florid Postern.',
     tagsZh: ['环境伤害非致命', '减伤保护', '绚丽之门复活'],
     tagsEn: ['Non-lethal hazards', 'Less damage', 'Portal revive'],
-    accentClass: 'from-emerald-500/18 via-teal-500/8 to-transparent border-emerald-500/35',
+    accentClass: 'bg-emerald-500/12 border-emerald-500/40',
     badgeClass: 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300 border-emerald-500/25',
   },
   {
@@ -50,7 +50,7 @@ export const PLAYSTYLES: PlaystyleDefinition[] = [
       "A never-ending Don't Starve sandbox. The world never resets when all players die, ghosts do not drain sanity, basic resources regrow, and survivors can always revive at the Florid Postern.",
     tagsZh: ['世界永不重置', '无鬼魂掉理智', '绚丽之门复活'],
     tagsEn: ['No world reset', 'No ghost drain', 'Portal revive'],
-    accentClass: 'from-sky-500/18 via-blue-500/8 to-transparent border-sky-500/35',
+    accentClass: 'bg-sky-500/14 border-sky-500/40',
     badgeClass: 'bg-sky-500/12 text-sky-700 dark:text-sky-300 border-sky-500/25',
   },
   {
@@ -67,7 +67,7 @@ export const PLAYSTYLES: PlaystyleDefinition[] = [
       "The classic Don't Starve Together experience. A reset timer starts if everyone dies, ghosts drain nearby survivors' sanity, and revival requires Telltale Hearts, Touch Stones, or Meat Effigies.",
     tagsZh: ['全员阵亡重置', '经典硬核规则', '原味生存'],
     tagsEn: ['Reset on wipe', 'Classic rules', 'Standard threat'],
-    accentClass: 'from-amber-500/18 via-orange-500/8 to-transparent border-amber-500/35',
+    accentClass: 'bg-amber-500/12 border-amber-500/40',
     badgeClass: 'bg-amber-500/12 text-amber-700 dark:text-amber-300 border-amber-500/25',
   },
   {
@@ -84,7 +84,7 @@ export const PLAYSTYLES: PlaystyleDefinition[] = [
       "It's dangerous out there! Survivors spawn scattered across the map instead of at a shared portal. On death, you return to character selection rather than becoming a ghost, and the world never resets.",
     tagsZh: ['随机地点出生', '死亡重选角色', '世界永不重置'],
     tagsEn: ['Random spawns', 'Respawn as new char', 'No world reset'],
-    accentClass: 'from-rose-500/18 via-red-500/8 to-transparent border-rose-500/35',
+    accentClass: 'bg-red-500/12 border-red-500/40',
     badgeClass: 'bg-rose-500/12 text-rose-700 dark:text-rose-300 border-rose-500/25',
   },
   {
@@ -101,7 +101,7 @@ export const PLAYSTYLES: PlaystyleDefinition[] = [
       "A dark twist on standard survival. The world stays in perpetual night with constant threats from Charlie and sanity drain, beginning at a darkness start location with basic light supplies.",
     tagsZh: ['仅夜晚循环', '黑暗开局补给', '高难挑战'],
     tagsEn: ['Night only', 'Darkness start', 'High challenge'],
-    accentClass: 'from-violet-500/20 via-purple-500/10 to-transparent border-violet-500/35',
+    accentClass: 'bg-[var(--phase-night)]/18 border-[var(--phase-night)]/50',
     badgeClass: 'bg-violet-500/12 text-violet-700 dark:text-violet-300 border-violet-500/25',
   },
 ]

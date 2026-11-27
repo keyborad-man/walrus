@@ -98,7 +98,7 @@ export function SetupPage() {
         <section className="hidden lg:flex lg:col-span-5 flex-col justify-between space-y-6 rounded-[10px] surface-card p-6">
           <div className="space-y-6">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-foreground text-background">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ember text-primary-foreground">
                 <WalrusLogo className="h-5 w-5" />
               </div>
               <div>
@@ -156,7 +156,7 @@ export function SetupPage() {
         <Card className="lg:col-span-7 w-full max-w-md lg:max-w-none mx-auto">
           <CardHeader className="space-y-3 pb-3">
             <div className="flex items-center gap-2.5 lg:hidden">
-              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-foreground text-background">
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ember text-primary-foreground">
                 <WalrusLogo className="h-5 w-5" />
               </div>
               <div>

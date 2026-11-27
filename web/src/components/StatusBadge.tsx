@@ -53,6 +53,7 @@ export function ShardStateBadge({ state }: { state?: ShardState | CompositeClust
 /** Pure inline SVG compact Day/Dusk/Night Clock Dial */
 export function DSTClockDial({ phase, className }: { phase?: string; className?: string }) {
   const angle = phase === 'night' ? 310 : phase === 'dusk' ? 215 : 65
+  const known = phase === 'day' || phase === 'dusk' || phase === 'night'
 
   return (
     <svg
@@ -65,29 +66,29 @@ export function DSTClockDial({ phase, className }: { phase?: string; className?:
       <path
         d="M 12 2.5 A 9.5 9.5 0 0 1 21.5 12 A 9.5 9.5 0 0 1 16.8 20.2"
         fill="none"
-        stroke="currentColor"
+        stroke={known ? 'var(--phase-day)' : 'currentColor'}
         strokeWidth="2.1"
         strokeLinecap="round"
         className="transition-opacity duration-200"
-        opacity={phase === 'day' || !phase || phase === 'unknown' ? '0.85' : '0.28'}
+        opacity={!known ? '0.2' : phase === 'day' ? '1' : '0.3'}
       />
       <path
         d="M 16.8 20.2 A 9.5 9.5 0 0 1 5.2 18.6"
         fill="none"
-        stroke="currentColor"
+        stroke={known ? 'var(--phase-dusk)' : 'currentColor'}
         strokeWidth="2.1"
         strokeLinecap="round"
         className="transition-opacity duration-200"
-        opacity={phase === 'dusk' ? '0.85' : '0.22'}
+        opacity={!known ? '0.2' : phase === 'dusk' ? '1' : '0.3'}
       />
       <path
         d="M 5.2 18.6 A 9.5 9.5 0 0 1 12 2.5"
         fill="none"
-        stroke="currentColor"
+        stroke={known ? 'var(--phase-night)' : 'currentColor'}
         strokeWidth="2.1"
         strokeLinecap="round"
         className="transition-opacity duration-200"
-        opacity={phase === 'night' ? '0.85' : '0.22'}
+        opacity={!known ? '0.2' : phase === 'night' ? '1' : '0.3'}
       />
       <line
         x1="12"
@@ -96,6 +97,7 @@ export function DSTClockDial({ phase, className }: { phase?: string; className?:
         y2="5.5"
         stroke="currentColor"
         strokeWidth="1.6"
+        opacity={known ? 1 : 0.35}
         strokeLinecap="round"
         className="transition-transform duration-300 ease-in-out motion-reduce:transition-none"
         style={{ transform: `rotate(${angle}deg)`, transformOrigin: '12px 12px' }}
@@ -120,14 +122,7 @@ export function DSTClockHeroDial({
   const angle = phase === 'night' ? 310 : phase === 'dusk' ? 215 : 68
   const ticks = Array.from({ length: 16 }, (_, i) => i * 22.5)
 
-  const seasonTone =
-    season === 'winter'
-      ? '#38bdf8'
-      : season === 'spring'
-        ? '#10b981'
-        : season === 'summer'
-          ? '#f59e0b'
-          : '#a1a1aa'
+  const seasonTone = `var(--season-${['winter', 'spring', 'summer'].includes(season) ? season : 'autumn'})`
 
   return (
     <svg
@@ -156,31 +151,31 @@ export function DSTClockHeroDial({
       <path
         d="M 48 16 A 32 32 0 0 1 80 48 A 32 32 0 0 1 64 75.7"
         fill="none"
-        stroke="currentColor"
+        stroke="var(--phase-day)"
         strokeWidth="5.5"
         strokeLinecap="butt"
         className="transition-opacity duration-300"
-        opacity={phase === 'day' || !phase || phase === 'unknown' ? '0.88' : '0.18'}
+        opacity={phase === 'day' || !phase || phase === 'unknown' ? '0.95' : '0.24'}
       />
       {/* Dusk segment */}
       <path
         d="M 64 75.7 A 32 32 0 0 1 22.2 66.8"
         fill="none"
-        stroke="#d97706"
+        stroke="var(--phase-dusk)"
         strokeWidth="5.5"
         strokeLinecap="butt"
         className="transition-opacity duration-300"
-        opacity={phase === 'dusk' ? '0.9' : '0.22'}
+        opacity={phase === 'dusk' ? '0.95' : '0.24'}
       />
       {/* Night segment */}
       <path
         d="M 22.2 66.8 A 32 32 0 0 1 48 16"
         fill="none"
-        stroke="#3b82f6"
+        stroke="var(--phase-night)"
         strokeWidth="5.5"
         strokeLinecap="butt"
         className="transition-opacity duration-300"
-        opacity={phase === 'night' ? '0.9' : '0.22'}
+        opacity={phase === 'night' ? '0.95' : '0.24'}
       />
 
       <circle cx="48" cy="48" r="24" fill="var(--card)" stroke="currentColor" strokeWidth="1" opacity="0.16" />
@@ -197,23 +192,11 @@ export function DSTClockHeroDial({
         <>
           <text
             x="48"
-            y="43"
-            textAnchor="middle"
-            fill="var(--muted-foreground)"
-            fontSize="7.5"
-            fontWeight="500"
-            letterSpacing="0.1em"
-          >
-            DAY
-          </text>
-          <text
-            x="48"
-            y="58"
+            y={day >= 1000 ? 54 : day >= 100 ? 55 : 57}
             textAnchor="middle"
             fill="var(--foreground)"
-            fontSize="16"
-            fontWeight="600"
-            fontFamily="var(--font-mono)"
+            fontSize={day >= 1000 ? 15 : day >= 100 ? 20 : 26}
+            className="font-display"
           >
             {day}
           </text>
@@ -240,10 +223,10 @@ export function SeasonBadge({
   if (!season || season === 'unknown' || day <= 0) return null
 
   const seasonIcon: Record<string, React.ReactNode> = {
-    autumn: <Flame className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />,
-    winter: <Snowflake className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />,
-    spring: <Flower2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />,
-    summer: <Sun className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />,
+    autumn: <Flame className="h-3.5 w-3.5 shrink-0 text-[var(--season-autumn)]" />,
+    winter: <Snowflake className="h-3.5 w-3.5 shrink-0 text-[var(--season-winter)]" />,
+    spring: <Flower2 className="h-3.5 w-3.5 shrink-0 text-[var(--season-spring)]" />,
+    summer: <Sun className="h-3.5 w-3.5 shrink-0 text-[var(--season-summer)]" />,
   }
   const phaseLabel = phase && phase !== 'unknown' ? t(`dashboard.phases.${phase}`, '') : ''
 

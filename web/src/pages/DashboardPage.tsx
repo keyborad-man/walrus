@@ -471,7 +471,7 @@ export function DashboardPage() {
         ) : (
           <div className="rounded-[10px] surface-card overflow-hidden">
             {/* Desktop Table Header */}
-            <div className="hidden lg:grid lg:grid-cols-[minmax(170px,1.25fr)_94px_minmax(150px,1.1fr)_100px_minmax(240px,1.85fr)_184px] items-center gap-5 px-4 py-2.5 border-b border-border text-xs text-muted-foreground">
+            <div className="hidden lg:grid lg:grid-cols-[minmax(150px,1.1fr)_84px_minmax(196px,1.3fr)_84px_minmax(230px,1.7fr)_184px] items-center gap-5 px-4 py-2.5 border-b border-border text-xs text-muted-foreground">
               <span>{t('dashboard.colCluster')}</span>
               <span>{t('dashboard.colStatus')}</span>
               <span>{t('dashboard.colWorld')}</span>
@@ -504,12 +504,21 @@ export function DashboardPage() {
                       ? t(`dashboard.phases.${c.world_info.phase}`, '')
                       : ''
                   const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
+                  const seasonColor = `var(--season-${['winter', 'spring', 'summer'].includes(c.world_info?.season) ? c.world_info.season : 'autumn'})`
+                  const [dayPrefix, daySuffix] = t('dashboard.day', { day: '\u0000' }).split('\u0000')
 
                   return (
                     <article
                       key={c.cluster_id}
-                      className="grid grid-cols-1 lg:grid-cols-[minmax(170px,1.25fr)_94px_minmax(150px,1.1fr)_100px_minmax(240px,1.85fr)_184px] items-start lg:items-center gap-3.5 lg:gap-5 px-4 py-3.5 hover:bg-[var(--surface-hover)]/35 transition-colors"
+                      className="relative grid grid-cols-1 lg:grid-cols-[minmax(150px,1.1fr)_84px_minmax(196px,1.3fr)_84px_minmax(230px,1.7fr)_184px] items-start lg:items-center gap-3.5 lg:gap-5 px-4 py-3.5 hover:bg-[var(--surface-hover)]/35 transition-colors"
                     >
+                      {hasWorldClock && (
+                        <span
+                          aria-hidden="true"
+                          className="absolute left-0 top-3 bottom-3 w-[3px] rounded-r-full"
+                          style={{ background: seasonColor }}
+                        />
+                      )}
                       {/* Col 1: Name + ID + Missing Token */}
                       <div className="min-w-0">
                         <div className="flex items-center justify-between gap-2 lg:block">
@@ -548,16 +557,20 @@ export function DashboardPage() {
                       </div>
 
                       {/* Col 3: World Clock */}
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <DSTClockDial phase={c.world_info?.phase} className="h-6 w-6 shrink-0" />
+                      <div className="flex items-center gap-3 min-w-0">
+                        <DSTClockDial phase={c.world_info?.phase} className="h-9 w-9 shrink-0" />
                         <div className="min-w-0 tabular-nums">
                           {hasWorldClock ? (
                             <>
-                              <div className="text-[13px] text-foreground leading-snug truncate">
-                                {t(`dashboard.seasons.${c.world_info.season}`, c.world_info.season)} ·{' '}
-                                {t('dashboard.day', { day: c.world_info.day })}
+                              <div className="flex items-baseline gap-1 leading-none whitespace-nowrap">
+                                <span className="text-[12px] text-muted-foreground">{dayPrefix}</span>
+                                <span className="font-display text-[22px] text-foreground">{c.world_info.day}</span>
+                                <span className="text-[12px] text-muted-foreground">{daySuffix}</span>
+                                <span className="ml-1.5 text-[12.5px] font-medium" style={{ color: seasonColor }}>
+                                  {t(`dashboard.seasons.${c.world_info.season}`, c.world_info.season)}
+                                </span>
                               </div>
-                              <div className="text-[11.5px] text-muted-foreground truncate">
+                              <div className="mt-1 text-[11.5px] text-muted-foreground truncate">
                                 {[
                                   phaseLabel,
                                   c.world_info.remaining_days_in_season > 0
@@ -830,7 +843,7 @@ function TelemetryCell({
       <div>
         <div
           className={cn(
-            'text-[26px] font-semibold tracking-[-0.025em] leading-none tabular-nums',
+            'font-display text-[30px] leading-none',
             isCritical
               ? 'text-red-700 dark:text-red-400'
               : isElevated
@@ -846,7 +859,7 @@ function TelemetryCell({
           }
         >
           {value}
-          {unit && <span className="ml-0.5 text-[14px] font-normal text-muted-foreground tracking-normal">{unit}</span>}
+          {unit && <span className="ml-1 text-[14px] font-normal text-muted-foreground tracking-normal">{unit}</span>}
         </div>
         {desc && <div className="mt-1 text-xs text-muted-foreground truncate">{desc}</div>}
       </div>

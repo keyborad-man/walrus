@@ -155,8 +155,8 @@ export function SteamPage() {
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>{t('steam.localVersion')}</CardDescription>
-            <CardTitle className="text-2xl font-mono flex items-center gap-2 flex-wrap tabular-nums">
-              <span>{status?.local_version || '—'}</span>
+            <CardTitle className="flex items-center gap-2.5 flex-wrap">
+              <span className="font-display text-[30px] leading-none">{status?.local_version || '—'}</span>
               <Badge variant={status?.installed ? 'success' : 'warning'}>
                 {status?.installed ? t('steam.installed') : t('steam.notInstalled')}
               </Badge>
@@ -171,8 +171,8 @@ export function SteamPage() {
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>{t('steam.remoteVersion')}</CardDescription>
-            <CardTitle className="text-2xl font-mono flex items-center gap-2 flex-wrap tabular-nums">
-              <span>{status?.remote_version || '—'}</span>
+            <CardTitle className="flex items-center gap-2.5 flex-wrap">
+              <span className="font-display text-[30px] leading-none">{status?.remote_version || '—'}</span>
               {status?.remote_version &&
                 (status.update_needed ? (
                   <Badge variant="warning">

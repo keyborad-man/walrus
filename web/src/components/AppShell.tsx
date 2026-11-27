@@ -241,7 +241,7 @@ export function AppShell() {
       'flex items-center gap-2.5 h-8 rounded-md px-2.5 text-[13px] transition-colors duration-150',
       focusRing,
       isActive
-        ? 'bg-[var(--surface-hover)] text-foreground font-medium [&_svg]:text-foreground'
+        ? 'bg-[var(--surface-hover)] text-foreground font-medium [&_svg]:text-ember'
         : 'text-muted-foreground hover:bg-[var(--surface-hover)]/65 hover:text-foreground [&_svg]:text-muted-foreground',
     )
 
@@ -272,10 +272,10 @@ export function AppShell() {
           onClick={(e) => guardedNavigate('/', e)}
           className={cn('flex items-center gap-2.5 min-w-0 rounded-md group', focusRing)}
         >
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-foreground text-background">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-ember text-primary-foreground">
             <WalrusLogo className="h-[18px] w-[18px]" />
           </div>
-          <span className="text-[13.5px] font-semibold tracking-[-0.015em] text-foreground truncate leading-tight">
+          <span className="font-display text-[16px] text-foreground truncate leading-tight">
             {t('common.appName')}
           </span>
           {panelVersion && (

@@ -1025,7 +1025,7 @@ function TerminalPane({
       )}
     >
       {/* Terminal Status Bar */}
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--surface-terminal-border)] bg-[#0d0d10] px-3.5 py-2 text-[11px] text-slate-300 shrink-0">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--surface-terminal-border)] bg-white/[0.025] px-3.5 py-2 text-[11px] text-slate-300 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           {icon}
           <span className="font-semibold text-slate-100 truncate">{title}</span>

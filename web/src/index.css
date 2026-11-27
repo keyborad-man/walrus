@@ -2,106 +2,190 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @font-face {
-  font-family: "Inter";
-  src: url("/fonts/inter-latin-var.woff2") format("woff2");
-  font-weight: 100 900;
-  font-style: normal;
+  font-family: "Recursive";
+  src: url("/fonts/recursive-latin-var.woff2") format("woff2");
+  font-weight: 300 1000;
+  font-style: oblique 0deg 15deg;
   font-display: swap;
 }
 
-@font-face {
-  font-family: "JetBrains Mono";
-  src: url("/fonts/jetbrains-mono-latin-var.woff2") format("woff2");
-  font-weight: 100 800;
-  font-style: normal;
-  font-display: swap;
-}
-
+/*
+ * 营地夜色 (Night Camp)
+ * Each cluster is a campfire: ember = lit / attention, moss = alive, moon = idle info,
+ * health red = danger. Dark theme is a pine-forest night; light theme is cool daylight stone.
+ * Text sits in parchment (dark) or forest ink (light).
+ */
 :root {
   color-scheme: light;
-  --background: #fafafa;
-  --foreground: #111113;
-  --card: #ffffff;
-  --card-foreground: #111113;
+  --background: #eef1ec;
+  --foreground: #18272b;
+  --card: #f9faf7;
+  --card-foreground: #18272b;
   --popover: #ffffff;
-  --popover-foreground: #111113;
-  --surface-sidebar: #f4f4f5;
-  --surface-elevated: #f4f4f5;
-  --surface-hover: #ededf0;
-  --surface-input: #ffffff;
+  --popover-foreground: #18272b;
+  --surface-sidebar: #e4e9e3;
+  --surface-elevated: #e8ece6;
+  --surface-hover: #dde3dc;
+  --surface-input: #fbfcfa;
   --surface-highlight: rgba(255, 255, 255, 0);
-  --surface-terminal: #0c0c0e;
-  --surface-terminal-border: #232327;
-  --primary: #111113;
-  --primary-foreground: #ffffff;
-  --secondary: #f1f1f4;
-  --secondary-foreground: #27272a;
-  --muted: #f4f4f5;
-  --muted-foreground: #686870;
-  --accent: #ededf0;
-  --accent-foreground: #111113;
-  --destructive: #dc2626;
+  --surface-terminal: #0e181b;
+  --surface-terminal-border: #1f2f33;
+  --primary: #18272b;
+  --primary-foreground: #f4f1e8;
+  --secondary: #e5eae4;
+  --secondary-foreground: #2b3a3d;
+  --muted: #e8ece6;
+  --muted-foreground: #55666a;
+  --accent: #dde3dc;
+  --accent-foreground: #18272b;
+  --destructive: #b3372a;
   --destructive-foreground: #ffffff;
-  --border: #e6e6e9;
-  --border-strong: #d4d4d9;
-  --input: #d4d4d9;
-  --ring: #52525b;
+  --border: #d3dbd3;
+  --border-strong: #bcc8bf;
+  --input: #bfcac2;
+  --ring: #c06914;
   --radius: 0.5rem;
-  /* DST Auth Campfire & Forest tokens (Light woodcut ink) */
-  --dst-tree-far: #ecebe7;
-  --dst-tree-mid: #e3e1da;
-  --dst-tree-near: #d8d5cc;
-  --dst-tree-stroke: rgba(17, 17, 19, 0.11);
-  --dst-ember-core: rgba(217, 119, 6, 0.14);
-  --dst-ember-outer: rgba(217, 119, 6, 0.055);
-  --dst-spark: #b45309;
-  --dst-spark-warm: #c2410c;
-  --dst-moon: rgba(17, 17, 19, 0.14);
-  --dst-star: rgba(17, 17, 19, 0.24);
-  --dst-beam: rgba(180, 83, 9, 0.28);
+  /* Signature hues */
+  --ember: #c06914;
+  --ember-soft: rgba(224, 134, 31, 0.14);
+  --season-autumn: #c46a1c;
+  --season-winter: #3f86a3;
+  --season-spring: #4f8a33;
+  --season-summer: #b98a12;
+  --phase-day: #d49a2a;
+  --phase-dusk: #b4483a;
+  --phase-night: #34507e;
+  /* DST Auth Campfire & Forest tokens (daylight stone) */
+  --dst-tree-far: #e1e7e0;
+  --dst-tree-mid: #d5ddd5;
+  --dst-tree-near: #c7d2c9;
+  --dst-tree-stroke: rgba(24, 39, 43, 0.12);
+  --dst-ember-core: rgba(224, 134, 31, 0.16);
+  --dst-ember-outer: rgba(224, 134, 31, 0.06);
+  --dst-spark: #c06914;
+  --dst-spark-warm: #b3372a;
+  --dst-moon: rgba(24, 39, 43, 0.14);
+  --dst-star: rgba(24, 39, 43, 0.24);
+  --dst-beam: rgba(192, 105, 20, 0.28);
 }
 
 .dark {
   color-scheme: dark;
-  --background: #0a0a0b;
-  --foreground: #ededef;
-  --card: #111113;
-  --card-foreground: #ededef;
-  --popover: #141417;
-  --popover-foreground: #ededef;
-  --surface-sidebar: #0a0a0b;
-  --surface-elevated: #17171a;
-  --surface-hover: #1c1c20;
-  --surface-input: #0e0e10;
+  --background: #111b1e;
+  --foreground: #e8e0cb;
+  --card: #172428;
+  --card-foreground: #e8e0cb;
+  --popover: #1a292d;
+  --popover-foreground: #e8e0cb;
+  --surface-sidebar: #0d1619;
+  --surface-elevated: #1c2c31;
+  --surface-hover: #223539;
+  --surface-input: #121e21;
   --surface-highlight: rgba(255, 255, 255, 0);
-  --surface-terminal: #08080a;
-  --surface-terminal-border: #1f1f23;
-  --primary: #ededef;
-  --primary-foreground: #0a0a0b;
-  --secondary: #18181b;
-  --secondary-foreground: #d4d4d8;
-  --muted: #161619;
-  --muted-foreground: #8a8a93;
-  --accent: #1c1c20;
-  --accent-foreground: #ededef;
-  --destructive: #dc2626;
+  --surface-terminal: #0a1214;
+  --surface-terminal-border: #1f3034;
+  --primary: #e8e0cb;
+  --primary-foreground: #111b1e;
+  --secondary: #1c2b2f;
+  --secondary-foreground: #d3ccb8;
+  --muted: #182529;
+  --muted-foreground: #8d9c98;
+  --accent: #223539;
+  --accent-foreground: #e8e0cb;
+  --destructive: #cf4a3b;
   --destructive-foreground: #ffffff;
-  --border: #1f1f23;
-  --border-strong: #2e2e34;
-  --input: #27272c;
-  --ring: #a1a1aa;
-  /* DST Auth Campfire & Forest tokens (Dark obsidian night) */
-  --dst-tree-far: #121216;
-  --dst-tree-mid: #0e0e11;
-  --dst-tree-near: #070709;
-  --dst-tree-stroke: rgba(255, 255, 255, 0.055);
-  --dst-ember-core: rgba(234, 88, 12, 0.17);
-  --dst-ember-outer: rgba(217, 119, 6, 0.075);
-  --dst-spark: #fbbf24;
-  --dst-spark-warm: #fb923c;
-  --dst-moon: rgba(237, 237, 239, 0.18);
-  --dst-star: rgba(237, 237, 239, 0.45);
-  --dst-beam: rgba(245, 158, 11, 0.36);
+  --border: #24363b;
+  --border-strong: #32484e;
+  --input: #2d4146;
+  --ring: #eca03a;
+  --ember: #eca03a;
+  --ember-soft: rgba(236, 160, 58, 0.14);
+  --season-autumn: #e0893a;
+  --season-winter: #8fc6d8;
+  --season-spring: #93c56c;
+  --season-summer: #e9c14a;
+  --phase-day: #e4b44a;
+  --phase-dusk: #cf5a43;
+  --phase-night: #5a7fbf;
+  /* DST Auth Campfire & Forest tokens (pine-forest night) */
+  --dst-tree-far: #172629;
+  --dst-tree-mid: #111d20;
+  --dst-tree-near: #0a1316;
+  --dst-tree-stroke: rgba(232, 224, 203, 0.06);
+  --dst-ember-core: rgba(236, 140, 40, 0.2);
+  --dst-ember-outer: rgba(236, 160, 58, 0.08);
+  --dst-spark: #f0b65a;
+  --dst-spark-warm: #e0861f;
+  --dst-moon: rgba(232, 224, 203, 0.2);
+  --dst-star: rgba(232, 224, 203, 0.48);
+  --dst-beam: rgba(236, 160, 58, 0.36);
+}
+
+/*
+ * Remap Tailwind palettes used across pages onto the Night Camp hues, so status
+ * colors (emerald = alive, amber = attention, red = danger, sky = info, slate = neutral)
+ * stay harmonious without touching every page.
+ */
+@theme {
+  --color-emerald-50: #f2f7ec;
+  --color-emerald-100: #e1edd3;
+  --color-emerald-200: #c5dcab;
+  --color-emerald-300: #a7ca82;
+  --color-emerald-400: #8fbc66;
+  --color-emerald-500: #72a347;
+  --color-emerald-600: #588536;
+  --color-emerald-700: #44682b;
+  --color-emerald-800: #375225;
+  --color-emerald-900: #2d431f;
+  --color-emerald-950: #17240f;
+
+  --color-amber-50: #fdf6ea;
+  --color-amber-100: #fae8c8;
+  --color-amber-200: #f5d08f;
+  --color-amber-300: #f0b65a;
+  --color-amber-400: #eca03a;
+  --color-amber-500: #e0861f;
+  --color-amber-600: #c06914;
+  --color-amber-700: #9a5015;
+  --color-amber-800: #7c4017;
+  --color-amber-900: #663617;
+  --color-amber-950: #3a1b08;
+
+  --color-red-50: #fcf1ef;
+  --color-red-100: #f9dfdb;
+  --color-red-200: #f3c0b8;
+  --color-red-300: #ec9a8f;
+  --color-red-400: #e27062;
+  --color-red-500: #cf4a3b;
+  --color-red-600: #b3372a;
+  --color-red-700: #942c22;
+  --color-red-800: #7a2820;
+  --color-red-900: #66261f;
+  --color-red-950: #37100c;
+
+  --color-sky-50: #eff6f8;
+  --color-sky-100: #d9eaef;
+  --color-sky-200: #b7d6df;
+  --color-sky-300: #8fc6d8;
+  --color-sky-400: #68a7bc;
+  --color-sky-500: #4b8a9f;
+  --color-sky-600: #3c6f83;
+  --color-sky-700: #33596a;
+  --color-sky-800: #2e4956;
+  --color-sky-900: #2a3f49;
+  --color-sky-950: #172830;
+
+  --color-slate-50: #f3f6f5;
+  --color-slate-100: #e5ebe9;
+  --color-slate-200: #cdd7d4;
+  --color-slate-300: #a9b8b4;
+  --color-slate-400: #82958f;
+  --color-slate-500: #657873;
+  --color-slate-600: #50615c;
+  --color-slate-700: #424f4c;
+  --color-slate-800: #38423f;
+  --color-slate-900: #2f3836;
+  --color-slate-950: #1b2321;
 }
 
 @theme inline {
@@ -124,8 +208,9 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-ember: var(--ember);
   --font-sans:
-    "Inter",
+    "Recursive",
     -apple-system,
     BlinkMacSystemFont,
     "PingFang SC",
@@ -134,7 +219,7 @@
     "Microsoft YaHei",
     sans-serif;
   --font-mono:
-    "JetBrains Mono",
+    "Recursive",
     ui-monospace,
     SFMono-Regular,
     Menlo,
@@ -162,7 +247,7 @@
 
   body {
     font-family: var(--font-sans);
-    font-feature-settings: "cv11";
+    font-variation-settings: "MONO" 0, "CASL" 0;
     caret-color: var(--foreground);
     text-rendering: optimizeLegibility;
   }
@@ -170,12 +255,14 @@
   code,
   kbd,
   pre,
-  samp {
+  samp,
+  .font-mono {
     font-family: var(--font-mono);
+    font-variation-settings: "MONO" 1, "CASL" 0;
   }
 
   ::selection {
-    background: color-mix(in srgb, var(--foreground) 16%, transparent);
+    background: color-mix(in srgb, var(--ember) 30%, transparent);
     color: var(--foreground);
   }
 
@@ -241,6 +328,15 @@
 
 .dst-ember-strip {
   /* Retained as neutral no-op class for backwards compatibility */
+}
+
+/* Hand-lettered numerals: Recursive's casual axis echoes DST's brushwork */
+.font-display {
+  font-family: var(--font-sans);
+  font-variation-settings: "MONO" 0, "CASL" 1;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Quiet section label */

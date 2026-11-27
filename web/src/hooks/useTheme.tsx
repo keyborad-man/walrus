@@ -30,7 +30,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
     const meta = document.querySelector('meta[name="theme-color"]')
     if (meta) {
-      meta.setAttribute('content', theme === 'dark' ? '#0a0a0b' : '#fafafa')
+      meta.setAttribute('content', theme === 'dark' ? '#111b1e' : '#eef1ec')
     }
     try {
       localStorage.setItem('walrus-theme', theme)

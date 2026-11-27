@@ -127,7 +127,7 @@ function WorldOptionIcon({ optionKey, modified }: { optionKey: string; modified:
       aria-hidden="true"
       className={cn(
         'h-12 w-12 shrink-0 overflow-hidden rounded-md bg-[#1d1814] shadow-xs ring-1 transition-shadow',
-        modified ? 'ring-primary/50' : 'ring-black/20 dark:ring-white/12',
+        modified ? 'ring-ember/70' : 'ring-black/20 dark:ring-white/12',
       )}
     >
       <img
