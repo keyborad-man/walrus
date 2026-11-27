@@ -12,13 +12,18 @@ import (
 // to emit structured JSON state prefixed with ProbePrefix (automatically filtered from console UI).
 const SilentProbeLua = `local s=TheWorld and TheWorld.state; local ps={}; for _,p in ipairs(AllPlayers or {}) do table.insert(ps,string.format('{"ku_id":%q,"name":%q,"prefab":%q,"age":%d}',tostring(p.userid or ""),tostring(p.name or ""),tostring(p.prefab or ""),math.floor((p.components and p.components.age and p.components.age:GetDisplayAgeInDays()) or 0))) end; print("__WALRUS_PROBE__:"..string.format('{"day":%d,"season":%q,"remaining_days_in_season":%d,"phase":%q,"online_players":[%s]}',s and ((s.cycles or 0)+1) or 0,s and tostring(s.season or "unknown") or "unknown",s and math.floor(s.remainingdaysinseason or 0) or 0,s and tostring(s.phase or "unknown") or "unknown",table.concat(ps,",")))`
 
-// ParseProbeLine parses a line containing ProbePrefix into WorldRuntimeInfo.
+// ParseProbeLine parses a line that starts with ProbePrefix (after the optional
+// "[hh:mm:ss]: " log timestamp) into WorldRuntimeInfo. The prefix must lead the
+// message so players cannot forge probe output by typing it into chat.
 func ParseProbeLine(line string) (WorldRuntimeInfo, bool) {
-	idx := strings.Index(line, ProbePrefix)
-	if idx < 0 {
+	body := strings.TrimSpace(line)
+	if m := tsPrefixRe.FindStringSubmatch(body); len(m) == 3 {
+		body = strings.TrimSpace(m[2])
+	}
+	if !strings.HasPrefix(body, ProbePrefix) {
 		return WorldRuntimeInfo{}, false
 	}
-	rawJSON := strings.TrimSpace(line[idx+len(ProbePrefix):])
+	rawJSON := strings.TrimSpace(body[len(ProbePrefix):])
 	var info WorldRuntimeInfo
 	if err := json.Unmarshal([]byte(rawJSON), &info); err != nil {
 		return WorldRuntimeInfo{}, false

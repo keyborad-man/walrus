@@ -2,6 +2,7 @@ package ws
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,21 +16,56 @@ import (
 	"walrus/internal/runtime"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+// newUpgrader rejects cross-origin handshakes so a third-party page cannot ride
+// the user's auth cookie. Dev mode allows any origin because the Vite proxy
+// rewrites Host but keeps the browser's Origin.
+func newUpgrader(devMode bool) *websocket.Upgrader {
+	return &websocket.Upgrader{
+		ReadBufferSize:  4096,
+		WriteBufferSize: 4096,
+		CheckOrigin: func(r *http.Request) bool {
+			if devMode {
+				return true
+			}
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // non-browser client
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			if strings.EqualFold(u.Host, r.Host) {
+				return true
+			}
+			fwd := r.Header.Get("X-Forwarded-Host")
+			return fwd != "" && strings.EqualFold(u.Host, strings.TrimSpace(strings.Split(fwd, ",")[0]))
+		},
+	}
 }
 
 type ConsoleHandler struct {
-	store  *db.Store
-	driver runtime.Driver
+	store    *db.Store
+	driver   runtime.Driver
+	upgrader *websocket.Upgrader
 }
 
-func NewConsoleHandler(store *db.Store, driver runtime.Driver) *ConsoleHandler {
-	return &ConsoleHandler{store: store, driver: driver}
+func NewConsoleHandler(store *db.Store, driver runtime.Driver, devMode bool) *ConsoleHandler {
+	return &ConsoleHandler{store: store, driver: driver, upgrader: newUpgrader(devMode)}
+}
+
+// currentRole re-reads the user so revoked permissions or disabled accounts
+// take effect on an already-open connection.
+func (h *ConsoleHandler) currentRole(userID int64, clusterID string) db.Role {
+	u, err := h.store.GetUserByID(userID)
+	if err != nil || u.Disabled {
+		return ""
+	}
+	r, err := h.store.EffectiveClusterRole(u, clusterID)
+	if err != nil {
+		return ""
+	}
+	return r
 }
 
 type clientMessage struct {
@@ -53,7 +89,7 @@ func (h *ConsoleHandler) ServeClusterLogs(c *gin.Context) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}
@@ -107,7 +143,7 @@ func (h *ConsoleHandler) ServeClusterLogs(c *gin.Context) {
 			}
 			_ = conn.SetReadDeadline(time.Now().Add(65 * time.Second))
 			if msg.Type == "command" && strings.TrimSpace(msg.Command) != "" {
-				if effRole.Rank() < db.RoleOperator.Rank() {
+				if h.currentRole(u.ID, clusterID).Rank() < db.RoleOperator.Rank() {
 					payload := apperr.CodeBody(apperr.CodeConsoleOperatorRequired, "operator permission required to send commands", nil)
 					payload["type"] = "error"
 					if msg.ReqID != "" {

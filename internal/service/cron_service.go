@@ -15,6 +15,7 @@ import (
 	"walrus/internal/apperr"
 	"walrus/internal/db"
 	"walrus/internal/dst"
+	"walrus/internal/lua"
 	"walrus/internal/runtime"
 	"walrus/internal/steam"
 )
@@ -223,11 +224,11 @@ func (s *CronService) runAnnounceTask(t *db.ScheduledTask, params map[string]any
 	if err != nil {
 		return "", err
 	}
-	clean := strings.ReplaceAll(msg, `"`, `\"`)
+	cmd := "c_announce(" + lua.QuoteString(msg) + ")"
 	sent := 0
 	for _, cid := range targets {
 		if st := s.driver.GetShardStatus(cid, "master"); st.State == runtime.StateRunning {
-			if err := s.driver.SendCommand(cid, "master", fmt.Sprintf(`c_announce("%s")`, clean)); err == nil {
+			if err := s.driver.SendCommand(cid, "master", cmd); err == nil {
 				sent++
 			}
 		}
@@ -264,10 +265,10 @@ func (s *CronService) broadcastCountdown(ctx context.Context, runningTargets []s
 		countdownSec = 5
 	}
 	broadcast := func(rem int) {
-		txt := strings.ReplaceAll(formatCountdownNotice(noticeTemplate, rem), `"`, `\"`)
+		cmd := "c_announce(" + lua.QuoteString(formatCountdownNotice(noticeTemplate, rem)) + ")"
 		for _, cid := range runningTargets {
 			if s.driver.GetShardStatus(cid, "master").State == runtime.StateRunning {
-				_ = s.driver.SendCommand(cid, "master", fmt.Sprintf(`c_announce("%s")`, txt))
+				_ = s.driver.SendCommand(cid, "master", cmd)
 			}
 		}
 	}

@@ -475,7 +475,12 @@ func (m *Manager) runMockServerUpdate(ctx context.Context, branch string) {
 }
 
 // DownloadWorkshopMod downloads a single Workshop item into DST's mods/workshop-<id> folder.
+var numericIDRe = regexp.MustCompile(`^[0-9]+$`)
+
 func (m *Manager) DownloadWorkshopMod(ctx context.Context, workshopID string) (string, error) {
+	if !numericIDRe.MatchString(workshopID) {
+		return "", apperr.Newf(apperr.CodeInvalidWorkshopID, map[string]any{"input": workshopID}, "invalid Steam Workshop ID %q", workshopID)
+	}
 	destDir := filepath.Join(m.dstServerDir, "mods", "workshop-"+workshopID)
 	if err := os.MkdirAll(filepath.Dir(destDir), 0o755); err != nil {
 		return "", err
@@ -547,6 +552,9 @@ func (m *Manager) DownloadWorkshopMods(ctx context.Context, workshopIDs []string
 		wid := strings.TrimSpace(raw)
 		if wid == "" {
 			continue
+		}
+		if !numericIDRe.MatchString(wid) {
+			return apperr.Newf(apperr.CodeInvalidWorkshopID, map[string]any{"input": wid}, "invalid Steam Workshop ID %q", wid)
 		}
 		if _, dup := seen[wid]; dup {
 			continue

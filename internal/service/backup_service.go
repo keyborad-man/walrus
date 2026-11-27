@@ -3,6 +3,7 @@ package service
 import (
 	"archive/zip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,9 +62,25 @@ func (s *BackupService) CreateBackup(ctx context.Context, clusterID, trigger, no
 		return nil, err
 	}
 
+	// Reserve a unique name: two backups of the same trigger within one second
+	// would otherwise overwrite each other's archive.
 	ts := time.Now().Format("20060102-150405")
-	filename := fmt.Sprintf("%s_%s_%s.zip", clusterID, ts, trigger)
-	zipPath := filepath.Join(destDir, filename)
+	var filename, zipPath string
+	for i := 1; ; i++ {
+		filename = fmt.Sprintf("%s_%s_%s.zip", clusterID, ts, trigger)
+		if i > 1 {
+			filename = fmt.Sprintf("%s_%s_%s-%d.zip", clusterID, ts, trigger, i)
+		}
+		zipPath = filepath.Join(destDir, filename)
+		f, err := os.OpenFile(zipPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_ = f.Close()
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+	}
 
 	size, err := zipDirectory(clusterDir, zipPath)
 	if err != nil {
@@ -183,7 +200,11 @@ func (s *BackupService) ImportClusterZip(clusterID, clusterName, tokenOverride s
 		return err
 	}
 
-	masterINI, _ := s.fs.ReadServerINI(clusterID, "master")
+	masterINI, err := s.fs.ReadServerINI(clusterID, "master")
+	if err != nil {
+		_ = os.RemoveAll(destDir)
+		return err
+	}
 	masterINI.IsMaster = true
 	masterINI.Name = "Master"
 	masterINI.ServerPort = ports.MasterServerPort
@@ -195,7 +216,11 @@ func (s *BackupService) ImportClusterZip(clusterID, clusterName, tokenOverride s
 	}
 
 	if hasCaves {
-		cavesINI, _ := s.fs.ReadServerINI(clusterID, "caves")
+		cavesINI, err := s.fs.ReadServerINI(clusterID, "caves")
+		if err != nil {
+			_ = os.RemoveAll(destDir)
+			return err
+		}
 		cavesINI.IsMaster = false
 		cavesINI.Name = "Caves"
 		cavesINI.ServerPort = ports.CavesServerPort
@@ -388,6 +413,14 @@ func (s *BackupService) DeleteBackup(clusterID string, backupID int64) error {
 	full := filepath.Join(s.backupsRoot, clusterID, filepath.Base(rec.Filename))
 	_ = os.Remove(full)
 	return s.store.DeleteBackupRecord(backupID)
+}
+
+// RemoveClusterArchives deletes every backup archive stored for a cluster.
+func (s *BackupService) RemoveClusterArchives(clusterID string) error {
+	if err := dst.ValidateClusterID(clusterID); err != nil {
+		return err
+	}
+	return os.RemoveAll(filepath.Join(s.backupsRoot, clusterID))
 }
 
 func zipDirectory(srcDir, destZip string) (int64, error) {

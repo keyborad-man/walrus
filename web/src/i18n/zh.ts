@@ -338,7 +338,7 @@ const zh = {
     toastAnnounced: '全服系统公告已广播',
     deleteCluster: '永久删除此集群',
     deleteConfirmTitle: '永久删除集群 "{{id}}"？',
-    deleteConfirm: '确认要彻底删除集群 "{{id}}" 及其磁盘上的全部存档文件吗？此操作不可撤销！',
+    deleteConfirm: '确认要彻底删除集群 "{{id}}" 及其磁盘上的全部存档、备份和定时任务吗？此操作不可撤销！',
     clusterDeleted: '集群已删除',
     crashHelpTitle: '分片异常退出',
     viewConsoleLogs: '查看实时日志',

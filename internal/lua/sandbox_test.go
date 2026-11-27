@@ -256,3 +256,24 @@ func TestEnsureLevelDataDefaults(t *testing.T) {
 		t.Fatalf("expected modded location untouched, got changed=%v err=%v", changedMod, err)
 	}
 }
+
+func TestSandboxStringRepIsCapped(t *testing.T) {
+	if _, err := ParseModInfo(`name = string.rep("a", 4e9)`, "en", "x"); err == nil {
+		t.Fatal("expected oversized string.rep to fail")
+	}
+	info, err := ParseModInfo(`name = string.rep("ab", 3, "-")`, "en", "x")
+	if err != nil {
+		t.Fatalf("small string.rep should work: %v", err)
+	}
+	if info.Name != "ab-ab-ab" {
+		t.Fatalf("unexpected rep result %q", info.Name)
+	}
+}
+
+func TestQuoteStringEscapesConsoleInjection(t *testing.T) {
+	got := QuoteString("x\"); c_shutdown(false) --\nC:\\")
+	want := `"x\"); c_shutdown(false) --\nC:\\"`
+	if got != want {
+		t.Fatalf("QuoteString = %s, want %s", got, want)
+	}
+}

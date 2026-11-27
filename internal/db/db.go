@@ -379,6 +379,30 @@ func (s *Store) CreateUser(username, passwordHash string, role Role, locale stri
 	return s.GetUserByID(id)
 }
 
+var ErrAlreadyInitialized = apperr.New(apperr.CodeSystemAlreadyInitialized, "system is already initialized")
+
+// CreateFirstAdmin inserts the initial admin only if the users table is empty,
+// in a single statement so concurrent setup requests cannot both succeed.
+func (s *Store) CreateFirstAdmin(username, passwordHash, locale string) (*User, error) {
+	if locale == "" {
+		locale = "zh-CN"
+	}
+	now := time.Now().UTC()
+	res, err := s.db.Exec(
+		`INSERT INTO users(username, password_hash, role, disabled, locale, created_at, updated_at)
+		 SELECT ?, ?, ?, 0, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)`,
+		username, passwordHash, string(RoleAdmin), locale, now, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrAlreadyInitialized
+	}
+	id, _ := res.LastInsertId()
+	return s.GetUserByID(id)
+}
+
 func (s *Store) GetUserByID(id int64) (*User, error) {
 	u := &User{}
 	var role string
@@ -533,6 +557,28 @@ func (s *Store) EffectiveClusterRole(u *User, clusterID string) (Role, error) {
 	return u.Role, nil
 }
 
+// HasOperatorAccess reports whether the user can operate at least one cluster,
+// using the same rules as EffectiveClusterRole.
+func (s *Store) HasOperatorAccess(u *User) (bool, error) {
+	if u == nil {
+		return false, nil
+	}
+	if u.Role == RoleAdmin {
+		return true, nil
+	}
+	var total, ops int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN role IN (?, ?) THEN 1 ELSE 0 END), 0) FROM user_cluster_permissions WHERE user_id = ?`,
+		string(RoleAdmin), string(RoleOperator), u.ID,
+	).Scan(&total, &ops); err != nil {
+		return false, err
+	}
+	if total > 0 {
+		return ops > 0, nil
+	}
+	return u.Role.Rank() >= RoleOperator.Rank(), nil
+}
+
 // --- Clusters Metadata ---
 
 func (s *Store) UpsertClusterMeta(m *ClusterMeta) error {
@@ -598,7 +644,17 @@ func (s *Store) ListClustersMeta() (map[string]ClusterMeta, error) {
 }
 
 func (s *Store) DeleteClusterMeta(clusterID string) error {
-	_, _ = s.db.Exec(`DELETE FROM user_cluster_permissions WHERE cluster_id = ?`, clusterID)
+	// Only drop the grant for users who keep other grants. A user whose sole
+	// grant is this cluster keeps the (now dangling) row so EffectiveClusterRole
+	// still treats them as restricted instead of falling back to the global role.
+	_, _ = s.db.Exec(
+		`DELETE FROM user_cluster_permissions WHERE cluster_id = ? AND user_id IN (SELECT user_id FROM user_cluster_permissions WHERE cluster_id <> ?)`,
+		clusterID, clusterID,
+	)
+	// Drop per-cluster records so a later cluster with the same ID does not
+	// inherit old backups or scheduled tasks.
+	_, _ = s.db.Exec(`DELETE FROM backups WHERE cluster_id = ?`, clusterID)
+	_, _ = s.db.Exec(`DELETE FROM scheduled_tasks WHERE cluster_id = ?`, clusterID)
 	_, err := s.db.Exec(`DELETE FROM clusters_meta WHERE cluster_id = ?`, clusterID)
 	return err
 }
@@ -796,11 +852,11 @@ func (s *Store) UpsertPlayerHistory(kuID, name, clusterID string) error {
 	return err
 }
 
-func (s *Store) ListPlayerHistory(limit int) ([]PlayerHistory, error) {
+func (s *Store) ListPlayerHistory(clusterID string, limit int) ([]PlayerHistory, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := s.db.Query(`SELECT ku_id, last_name, last_cluster_id, last_seen_at FROM player_history ORDER BY last_seen_at DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT ku_id, last_name, last_cluster_id, last_seen_at FROM player_history WHERE last_cluster_id = ? ORDER BY last_seen_at DESC LIMIT ?`, clusterID, limit)
 	if err != nil {
 		return nil, err
 	}

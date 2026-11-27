@@ -338,7 +338,7 @@ const en = {
     toastAnnounced: 'Server announcement broadcasted',
     deleteCluster: 'Delete Cluster Permanently',
     deleteConfirmTitle: 'Permanently delete cluster "{{id}}"?',
-    deleteConfirm: 'Permanently delete cluster "{{id}}" and all its save files on disk? This cannot be undone!',
+    deleteConfirm: 'Permanently delete cluster "{{id}}" along with all its save files, backups and scheduled tasks? This cannot be undone!',
     clusterDeleted: 'Cluster deleted',
     crashHelpTitle: 'Shard Exited Unexpectedly',
     viewConsoleLogs: 'View Live Console',

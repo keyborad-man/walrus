@@ -103,8 +103,10 @@ func (s *Server) handleDeleteCluster(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, err)
 		return
 	}
+	_ = s.backupSvc.RemoveClusterArchives(id)
+	_ = s.cronSvc.Reload()
 	u := auth.CurrentUser(c)
-	s.store.AddAuditLog(u.Username, "cluster.delete", id, "Deleted cluster directory and metadata", c.ClientIP())
+	s.store.AddAuditLog(u.Username, "cluster.delete", id, "Deleted cluster directory, backups, schedules and metadata", c.ClientIP())
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

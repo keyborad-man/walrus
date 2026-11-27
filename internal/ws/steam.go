@@ -17,10 +17,11 @@ import (
 type SteamHandler struct {
 	store    *db.Store
 	steamMgr *steam.Manager
+	upgrader *websocket.Upgrader
 }
 
-func NewSteamHandler(store *db.Store, steamMgr *steam.Manager) *SteamHandler {
-	return &SteamHandler{store: store, steamMgr: steamMgr}
+func NewSteamHandler(store *db.Store, steamMgr *steam.Manager, devMode bool) *SteamHandler {
+	return &SteamHandler{store: store, steamMgr: steamMgr, upgrader: newUpgrader(devMode)}
 }
 
 func (h *SteamHandler) ServeSteamLogs(c *gin.Context) {
@@ -30,7 +31,7 @@ func (h *SteamHandler) ServeSteamLogs(c *gin.Context) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
 	}

@@ -54,7 +54,11 @@ func (s *Server) handleSetup(c *gin.Context) {
 		respondCodeError(c, http.StatusInternalServerError, apperr.CodePasswordHashFailed, "failed to hash password")
 		return
 	}
-	u, err := s.store.CreateUser(strings.TrimSpace(req.Username), hash, db.RoleAdmin, req.Locale)
+	u, err := s.store.CreateFirstAdmin(strings.TrimSpace(req.Username), hash, req.Locale)
+	if errors.Is(err, db.ErrAlreadyInitialized) {
+		respondCodeError(c, http.StatusConflict, apperr.CodeSystemAlreadyInitialized, "system is already initialized")
+		return
+	}
 	if err != nil {
 		respondError(c, http.StatusBadRequest, err)
 		return

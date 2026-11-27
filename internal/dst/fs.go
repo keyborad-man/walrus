@@ -221,17 +221,17 @@ func (f *FS) WriteClusterINI(clusterID string, c *ClusterINI) error {
 
 	var sb strings.Builder
 	sb.WriteString("[GAMEPLAY]\n")
-	fmt.Fprintf(&sb, "game_mode = %s\n", c.GameMode)
+	fmt.Fprintf(&sb, "game_mode = %s\n", iniValue(c.GameMode))
 	fmt.Fprintf(&sb, "max_players = %d\n", c.MaxPlayers)
 	fmt.Fprintf(&sb, "pvp = %t\n", c.PVP)
 	fmt.Fprintf(&sb, "pause_when_empty = %t\n\n", c.PauseWhenEmpty)
 
 	sb.WriteString("[NETWORK]\n")
-	fmt.Fprintf(&sb, "cluster_name = %s\n", c.ClusterName)
-	fmt.Fprintf(&sb, "cluster_description = %s\n", c.ClusterDescription)
-	fmt.Fprintf(&sb, "cluster_password = %s\n", c.ClusterPassword)
-	fmt.Fprintf(&sb, "cluster_intention = %s\n", c.ClusterIntention)
-	fmt.Fprintf(&sb, "cluster_language = %s\n", c.ClusterLanguage)
+	fmt.Fprintf(&sb, "cluster_name = %s\n", iniValue(c.ClusterName))
+	fmt.Fprintf(&sb, "cluster_description = %s\n", iniValue(c.ClusterDescription))
+	fmt.Fprintf(&sb, "cluster_password = %s\n", iniValue(c.ClusterPassword))
+	fmt.Fprintf(&sb, "cluster_intention = %s\n", iniValue(c.ClusterIntention))
+	fmt.Fprintf(&sb, "cluster_language = %s\n", iniValue(c.ClusterLanguage))
 	fmt.Fprintf(&sb, "lan_only_cluster = %t\n", c.LanOnlyCluster)
 	fmt.Fprintf(&sb, "offline_cluster = %t\n", c.OfflineCluster)
 	fmt.Fprintf(&sb, "autosaver_enabled = %t\n", c.AutosaverEnabled)
@@ -244,12 +244,18 @@ func (f *FS) WriteClusterINI(clusterID string, c *ClusterINI) error {
 
 	sb.WriteString("[SHARD]\n")
 	fmt.Fprintf(&sb, "shard_enabled = %t\n", c.ShardEnabled)
-	fmt.Fprintf(&sb, "bind_ip = %s\n", c.BindIP)
-	fmt.Fprintf(&sb, "master_ip = %s\n", c.MasterIP)
+	fmt.Fprintf(&sb, "bind_ip = %s\n", iniValue(c.BindIP))
+	fmt.Fprintf(&sb, "master_ip = %s\n", iniValue(c.MasterIP))
 	fmt.Fprintf(&sb, "master_port = %d\n", c.MasterPort)
-	fmt.Fprintf(&sb, "cluster_key = %s\n", c.ClusterKey)
+	fmt.Fprintf(&sb, "cluster_key = %s\n", iniValue(c.ClusterKey))
 
 	return WriteFileAtomic(filepath.Join(dir, "cluster.ini"), []byte(sb.String()), 0o644)
+}
+
+// iniValue strips line breaks so a user-supplied value cannot inject extra
+// keys or sections into the generated INI file.
+func iniValue(v string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(v)
 }
 
 // --- server.ini ---
@@ -307,9 +313,9 @@ func (f *FS) WriteServerINI(clusterID, shard string, s *ServerINI) error {
 	sb.WriteString("[SHARD]\n")
 	fmt.Fprintf(&sb, "is_master = %t\n", s.IsMaster)
 	if !s.IsMaster {
-		fmt.Fprintf(&sb, "name = %s\n", s.Name)
+		fmt.Fprintf(&sb, "name = %s\n", iniValue(s.Name))
 		if s.ID != "" {
-			fmt.Fprintf(&sb, "id = %s\n", s.ID)
+			fmt.Fprintf(&sb, "id = %s\n", iniValue(s.ID))
 		}
 	}
 	sb.WriteString("\n[ACCOUNT]\n")

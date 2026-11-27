@@ -71,8 +71,8 @@ func NewServer(
 		webhookSvc: webhookSvc,
 		steamMgr:   steamMgr,
 		updaterSvc: updaterSvc,
-		wsHandler:  ws.NewConsoleHandler(store, driver),
-		steamWS:    ws.NewSteamHandler(store, steamMgr),
+		wsHandler:  ws.NewConsoleHandler(store, driver, cfg.DevMode),
+		steamWS:    ws.NewSteamHandler(store, steamMgr, cfg.DevMode),
 		publicIP:   newPublicIPResolver(),
 		staticFS:   staticFS,
 	}
@@ -120,12 +120,12 @@ func (s *Server) Engine() *gin.Engine {
 			// Workshop & Mod Library (read/search available to all authenticated users; upload/delete admin)
 			authed.GET("/mods/workshop/search", s.handleWorkshopSearch)
 			authed.GET("/mods/library", s.handleListModLibrary)
-			authed.POST("/mods/:modId/download", s.handleRedownloadMod)
+			authed.POST("/mods/:modId/download", s.authSvc.RequireAnyOperator(), s.handleRedownloadMod)
 
 			// GM Command Snippets
 			authed.GET("/snippets", s.handleListSnippets)
-			authed.POST("/snippets", s.handleCreateSnippet)
-			authed.DELETE("/snippets/:sid", s.handleDeleteSnippet)
+			authed.POST("/snippets", s.authSvc.RequireAnyOperator(), s.handleCreateSnippet)
+			authed.DELETE("/snippets/:sid", s.authSvc.RequireAnyOperator(), s.handleDeleteSnippet)
 
 			// Clusters
 			authed.GET("/clusters", s.handleListClusters)

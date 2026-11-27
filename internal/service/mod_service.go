@@ -507,7 +507,7 @@ func (s *ModService) AddWorkshopInput(ctx context.Context, clusterID, shard, inp
 	}
 	overrides, err := lua.ParseModOverrides(raw)
 	if err != nil {
-		overrides = map[string]lua.ModOverride{}
+		return nil, err
 	}
 
 	added := make([]string, 0, len(ids))
@@ -595,7 +595,7 @@ func (s *ModService) AddLocalModToCluster(clusterID, shard, modID, locale string
 	}
 	overrides, err := lua.ParseModOverrides(raw)
 	if err != nil {
-		overrides = map[string]lua.ModOverride{}
+		return err
 	}
 
 	_, info, _, _ := s.inspectMod(modID, locale)

@@ -79,11 +79,42 @@ func newSandboxedState(ctx context.Context) *glua.LState {
 	glua.OpenString(L)
 	glua.OpenMath(L)
 
+	// Replace string.rep with a size-capped version: a single call such as
+	// string.rep("a", 4e9) allocates in Go before the context timeout can fire.
+	if strLib, ok := L.GetGlobal("string").(*glua.LTable); ok {
+		strLib.RawSetString("rep", L.NewFunction(safeStringRep))
+	}
+
 	// Strip file/code loading builtins from base library.
 	for _, banned := range []string{"dofile", "loadfile", "load", "loadstring", "module", "require", "collectgarbage"} {
 		L.SetGlobal(banned, glua.LNil)
 	}
 	return L
+}
+
+const maxRepBytes = 1 << 20
+
+func safeStringRep(L *glua.LState) int {
+	str := L.CheckString(1)
+	n := L.CheckInt(2)
+	sep := L.OptString(3, "")
+	if n <= 0 {
+		L.Push(glua.LString(""))
+		return 1
+	}
+	if int64(len(str)+len(sep))*int64(n) > maxRepBytes {
+		L.RaiseError("string.rep result exceeds %d bytes", maxRepBytes)
+		return 0
+	}
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			sb.WriteString(sep)
+		}
+		sb.WriteString(str)
+	}
+	L.Push(glua.LString(sb.String()))
+	return 1
 }
 
 // NormalizeDSTLocale converts BCP-47 UI locales to DST's modinfo locale convention.
@@ -603,6 +634,10 @@ func writeLuaValue(sb *strings.Builder, val any, indent int) {
 		sb.WriteString(quoteLuaString(fmt.Sprintf("%v", v)))
 	}
 }
+
+// QuoteString returns s as a double-quoted Lua string literal with escapes,
+// safe to embed in a single-line console command.
+func QuoteString(s string) string { return quoteLuaString(s) }
 
 func quoteLuaString(s string) string {
 	var sb strings.Builder

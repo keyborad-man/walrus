@@ -114,7 +114,10 @@ func (s *ClusterService) ListClusters(u *db.User) ([]ClusterSummary, error) {
 		if err != nil {
 			continue
 		}
-		ms, _ := s.fs.ReadServerINI(id, "master")
+		var masterPort int
+		if ms, err := s.fs.ReadServerINI(id, "master"); err == nil {
+			masterPort = ms.ServerPort
+		}
 
 		meta, hasMeta := metas[id]
 		cavesEnabled := s.fs.HasCavesDir(id)
@@ -145,7 +148,7 @@ func (s *ClusterService) ListClusters(u *db.User) ([]ClusterSummary, error) {
 			MaxPlayers:    ci.MaxPlayers,
 			CavesEnabled:  cavesEnabled,
 			AutoRestart:   autoRestart,
-			MasterPort:    ms.ServerPort,
+			MasterPort:    masterPort,
 			CavesPort:     cavesPort,
 			MasterStatus:  masterSt,
 			CavesStatus:   cavesSt,
@@ -430,14 +433,12 @@ func (s *ClusterService) UpdateClusterConfig(clusterID string, req UpdateCluster
 			return nil, err
 		}
 		if !s.fs.HasCavesDir(clusterID) || detail.CavesServerINI == nil {
-			if _, err := os.Stat(clusterID); err != nil {
-				// Ensure Caves leveldataoverride & modoverrides exist if missing.
-				if cur, err := s.fs.ReadLevelData(clusterID, "caves"); err == nil {
-					_ = s.fs.WriteLevelData(clusterID, "caves", cur)
-				}
-				if curM, err := s.fs.ReadModOverrides(clusterID, "caves"); err == nil {
-					_ = s.fs.WriteModOverrides(clusterID, "caves", curM)
-				}
+			// Ensure Caves leveldataoverride & modoverrides exist if missing.
+			if cur, err := s.fs.ReadLevelData(clusterID, "caves"); err == nil {
+				_ = s.fs.WriteLevelData(clusterID, "caves", cur)
+			}
+			if curM, err := s.fs.ReadModOverrides(clusterID, "caves"); err == nil {
+				_ = s.fs.WriteModOverrides(clusterID, "caves", curM)
 			}
 		}
 	}
@@ -546,7 +547,7 @@ func (s *ClusterService) GetPlayerLists(clusterID string) (*PlayerLists, error) 
 	if err != nil {
 		return nil, err
 	}
-	hist, _ := s.store.ListPlayerHistory(200)
+	hist, _ := s.store.ListPlayerHistory(clusterID, 200)
 	if hist == nil {
 		hist = []db.PlayerHistory{}
 	}

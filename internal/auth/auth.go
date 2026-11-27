@@ -212,6 +212,23 @@ func (s *Service) RequireAdmin() gin.HandlerFunc {
 	}
 }
 
+// RequireAnyOperator allows users who hold operator (or higher) access on at
+// least one cluster; used for global resources shared by cluster operators.
+func (s *Service) RequireAnyOperator() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ok, err := s.store.HasOperatorAccess(CurrentUser(c))
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, apperr.CodeBody(apperr.CodePermissionLookupFailed, "permission lookup failed", nil))
+			return
+		}
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, apperr.CodeBody(apperr.CodeInsufficientClusterPerm, "insufficient cluster permission", nil))
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequireClusterRole checks user's effective role on :id cluster path parameter.
 func (s *Service) RequireClusterRole(minRole db.Role) gin.HandlerFunc {
 	return func(c *gin.Context) {
