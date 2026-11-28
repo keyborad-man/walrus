@@ -6,17 +6,24 @@ export function Skeleton({ className }: { className?: string }) {
 
 export function DashboardSkeleton() {
   return (
-    <div className="rounded-[10px] surface-card divide-y divide-border" aria-busy="true">
+    <div className="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,21rem),1fr))]" aria-busy="true">
       {[0, 1].map((idx) => (
-        <div key={idx} className="p-4 flex items-center justify-between gap-4">
-          <div className="space-y-2 flex-1">
-            <Skeleton className="h-4 w-36" />
-            <Skeleton className="h-3 w-24" />
+        <div key={idx} className="rounded-xl surface-card p-5 space-y-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-36" />
+              <Skeleton className="h-3 w-24" />
+            </div>
+            <Skeleton className="h-4 w-14" />
           </div>
-          <Skeleton className="h-4 w-16" />
-          <Skeleton className="h-4 w-28 hidden md:block" />
-          <Skeleton className="h-4 w-20 hidden lg:block" />
-          <Skeleton className="h-7 w-20 rounded-md" />
+          <div className="flex items-center gap-3.5">
+            <Skeleton className="h-14 w-14 rounded-full" />
+            <div className="space-y-2">
+              <Skeleton className="h-6 w-24" />
+              <Skeleton className="h-3 w-20" />
+            </div>
+          </div>
+          <Skeleton className="h-24 w-full rounded-lg" />
         </div>
       ))}
     </div>

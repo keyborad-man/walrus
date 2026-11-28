@@ -171,7 +171,8 @@ export function AppShell() {
     retry: false,
   })
   const clusters = clustersData?.clusters ?? []
-  const updateNeeded = steamData?.status?.update_needed ?? false
+  // "Update available" only means something once a server is installed; before that the nav would contradict "not installed".
+  const updateNeeded = Boolean(steamData?.status?.installed && steamData.status.update_needed)
   const panelVersion = versionData?.info?.current_version
   const panelUpdateAvailable = versionData?.info?.update_available ?? false
   const activeCluster = clusters.find((c) => c.cluster_id === activeClusterId)
@@ -281,7 +282,7 @@ export function AppShell() {
           {panelVersion && (
             <span
               title={versionData?.info?.commit && versionData.info.commit !== 'none' ? `${panelVersion} (${versionData.info.commit})` : panelVersion}
-              className="rounded bg-[var(--surface-hover)] px-1.5 py-0.5 font-mono text-[10.5px] leading-none text-muted-foreground shrink-0"
+              className="rounded bg-[var(--surface-elevated)] px-1.5 py-0.5 font-mono text-[11px] leading-none text-muted-foreground shrink-0"
             >
               {panelVersion}
             </span>

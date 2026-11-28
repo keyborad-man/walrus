@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
@@ -7,44 +7,53 @@ import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
+  ChevronDown,
+  Copy,
   Download,
+  Eye,
+  EyeOff,
+  Flame,
+  Flower2,
   Loader2,
   Play,
   Plus,
   RotateCw,
   Server,
+  Snowflake,
   Square,
+  Sun,
   Upload,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { formatAuditAction, formatConnectCommand } from '@/lib/dst'
-import { cn, getClusterHealth } from '@/lib/utils'
+import { formatCharacterName, formatConnectCommand } from '@/lib/dst'
+import { cn, formatUptime, getClusterHealth } from '@/lib/utils'
 import { useAuth } from '@/hooks/useAuth'
 import { Button, buttonVariants } from '@/components/ui/button'
-import { CopyButton } from '@/components/ui/copy-button'
-import { Sparkline } from '@/components/ui/sparkline'
+import { CopyButton, copyTextWithFallback } from '@/components/ui/copy-button'
+import { CollapsibleContent } from '@/components/ui/collapsible'
 import { DashboardSkeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/PageHeader'
 import { DSTClockDial, ShardStateBadge } from '@/components/StatusBadge'
 import { ImportClusterDialog } from '@/components/ImportClusterDialog'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { QueryErrorCard } from '@/components/QueryErrorCard'
-import type { ClusterSummary, ShardStatus } from '@/types/api'
-
-const MAX_SPARK_SAMPLES = 18
+import type { ClusterSummary, HostMetrics, ShardStatus, SteamStatus } from '@/types/api'
 
 type ClusterFilter = 'all' | 'running' | 'stopped'
 
-function formatShortTime(iso: string): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
+/** Filtering only earns its place once the lobby no longer fits at a glance. */
+const FILTER_MIN_CLUSTERS = 4
+const MAX_PLAYER_CHIPS = 5
+
+const isClusterActive = (c: ClusterSummary) =>
+  c.master_status.state === 'running' ||
+  c.master_status.state === 'starting' ||
+  (c.caves_enabled && (c.caves_status?.state === 'running' || c.caves_status?.state === 'starting'))
+
+const clusterName = (c: ClusterSummary) => c.cluster_name || c.cluster_id
 
 export function DashboardPage() {
-  const { t, i18n } = useTranslation()
-  const isEn = i18n.language === 'en-US'
+  const { t } = useTranslation()
   const { user } = useAuth()
   const qc = useQueryClient()
   const navigate = useNavigate()
@@ -55,14 +64,8 @@ export function DashboardPage() {
   const [batchBusy, setBatchBusy] = useState(false)
   const [stopAllConfirmOpen, setStopAllConfirmOpen] = useState(false)
   const [pendingAction, setPendingAction] = useState<{ kind: 'stop' | 'restart'; cluster: ClusterSummary } | null>(null)
-  const [history, setHistory] = useState<{ cpu: number[]; mem: number[]; disk: number[]; players: number[] }>({
-    cpu: [],
-    mem: [],
-    disk: [],
-    players: [],
-  })
 
-  const { data: metricsData, dataUpdatedAt: metricsUpdatedAt } = useQuery({
+  const { data: metricsData } = useQuery({
     queryKey: ['system-metrics'],
     queryFn: api.metrics,
     refetchInterval: 4000,
@@ -89,19 +92,15 @@ export function DashboardPage() {
     queryFn: api.steamStatus,
     refetchInterval: 30000,
   })
-  const isAdmin = user?.role === 'admin'
-  const { data: auditData } = useQuery({
-    queryKey: ['dashboard-audit-recent'],
-    queryFn: () => api.auditLogs(5, ''),
-    enabled: isAdmin,
-    refetchInterval: 15000,
-  })
 
+  const isAdmin = user?.role === 'admin'
   const metrics = metricsData?.metrics
   const connectHost = publicIpData?.ip || window.location.hostname
   const clusters = clustersData?.clusters ?? []
   const steamStatus = steamData?.status
-  const recentLogs = auditData?.logs ?? []
+  const serverInstalled = steamStatus ? steamStatus.installed : true
+  // Mock runtime fakes the DST binary and token, so nothing blocks a start there.
+  const enforceStartPrereqs = steamStatus ? steamStatus.runtime_mode !== 'mock' : false
 
   const onlineClusters = clusters.filter(
     (c) => c.master_status.state === 'running' || c.caves_status?.state === 'running',
@@ -109,15 +108,22 @@ export function DashboardPage() {
   const totalOnlinePlayers = clusters.reduce((sum, c) => sum + (c.world_info?.online_players?.length ?? 0), 0)
   const operableClusters = clusters.filter((c) => c.effective_role === 'admin' || c.effective_role === 'operator')
 
-  useEffect(() => {
-    if (!metrics || !metricsUpdatedAt) return
-    setHistory((prev) => ({
-      cpu: [...prev.cpu.slice(-(MAX_SPARK_SAMPLES - 1)), metrics.cpu_percent],
-      mem: [...prev.mem.slice(-(MAX_SPARK_SAMPLES - 1)), metrics.memory_percent],
-      disk: [...prev.disk.slice(-(MAX_SPARK_SAMPLES - 1)), metrics.disk_percent],
-      players: [...prev.players.slice(-(MAX_SPARK_SAMPLES - 1)), totalOnlinePlayers],
-    }))
-  }, [metrics, metricsUpdatedAt, totalOnlinePlayers])
+  const startBlockReason = (c: ClusterSummary): string | null => {
+    if (!enforceStartPrereqs) return null
+    if (!serverInstalled) return t('dashboard.startBlockedNoServer')
+    if (!c.has_token) return t('dashboard.startBlockedNoToken')
+    return null
+  }
+
+  const stoppedOperable = operableClusters.filter((c) => !isClusterActive(c))
+  const batchStartTargets = stoppedOperable.filter((c) => !startBlockReason(c))
+  const batchStopTargets = operableClusters.filter(
+    (c) => c.master_status.state === 'running' || c.caves_status?.state === 'running',
+  )
+  const playersOnStop = batchStopTargets
+    .map((c) => ({ name: clusterName(c), count: c.world_info?.online_players?.length ?? 0 }))
+    .filter((x) => x.count > 0)
+  const playersOnStopTotal = playersOnStop.reduce((sum, x) => sum + x.count, 0)
 
   const filteredClusters = clusters.filter((c) => {
     const running = c.master_status.state === 'running' || c.caves_status?.state === 'running'
@@ -126,6 +132,8 @@ export function DashboardPage() {
     return true
   })
 
+  const afterClusterChange = () => void qc.invalidateQueries({ queryKey: ['clusters'] })
+
   const startMut = useMutation({
     mutationFn: (id: string) => {
       setBusyClusterId(id)
@@ -133,11 +141,15 @@ export function DashboardPage() {
     },
     onSuccess: (_, id) => {
       const target = clusters.find((c) => c.cluster_id === id)
-      toast.success(t('dashboard.toastStarted', { name: target?.cluster_name || id }))
-      void qc.invalidateQueries({ queryKey: ['clusters'] })
-      void qc.invalidateQueries({ queryKey: ['dashboard-audit-recent'] })
+      toast.success(t('dashboard.toastStarted', { name: target ? clusterName(target) : id }))
+      afterClusterChange()
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error, id) => {
+      const target = clusters.find((c) => c.cluster_id === id)
+      toast.error(t('dashboard.toastStartFailed', { name: target ? clusterName(target) : id }), {
+        description: err.message,
+      })
+    },
     onSettled: () => setBusyClusterId(null),
   })
 
@@ -148,12 +160,16 @@ export function DashboardPage() {
     },
     onSuccess: (_, id) => {
       const target = clusters.find((c) => c.cluster_id === id)
-      toast.success(t('dashboard.toastStopped', { name: target?.cluster_name || id }))
+      toast.success(t('dashboard.toastStopped', { name: target ? clusterName(target) : id }))
       setPendingAction(null)
-      void qc.invalidateQueries({ queryKey: ['clusters'] })
-      void qc.invalidateQueries({ queryKey: ['dashboard-audit-recent'] })
+      afterClusterChange()
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error, id) => {
+      const target = clusters.find((c) => c.cluster_id === id)
+      toast.error(t('dashboard.toastStopFailed', { name: target ? clusterName(target) : id }), {
+        description: err.message,
+      })
+    },
     onSettled: () => setBusyClusterId(null),
   })
 
@@ -164,12 +180,16 @@ export function DashboardPage() {
     },
     onSuccess: (_, id) => {
       const target = clusters.find((c) => c.cluster_id === id)
-      toast.success(t('dashboard.toastRestarted', { name: target?.cluster_name || id }))
+      toast.success(t('dashboard.toastRestarted', { name: target ? clusterName(target) : id }))
       setPendingAction(null)
-      void qc.invalidateQueries({ queryKey: ['clusters'] })
-      void qc.invalidateQueries({ queryKey: ['dashboard-audit-recent'] })
+      afterClusterChange()
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error, id) => {
+      const target = clusters.find((c) => c.cluster_id === id)
+      toast.error(t('dashboard.toastRestartFailed', { name: target ? clusterName(target) : id }), {
+        description: err.message,
+      })
+    },
     onSettled: () => setBusyClusterId(null),
   })
 
@@ -184,200 +204,178 @@ export function DashboardPage() {
     }
   }
 
-  const runBatchStart = async () => {
-    const stopped = operableClusters.filter((c) => c.master_status.state !== 'running')
-    if (stopped.length === 0) return
+  /** Runs a batch and reports exactly what happened, per cluster, instead of a blanket "success". */
+  const runBatch = async (kind: 'start' | 'stop', targets: ClusterSummary[]) => {
+    if (targets.length === 0) return
     setBatchBusy(true)
     try {
-      await Promise.allSettled(stopped.map((c) => api.startCluster(c.cluster_id)))
-      toast.success(t('common.actionSuccess'))
-      void qc.invalidateQueries({ queryKey: ['clusters'] })
+      const results = await Promise.allSettled(
+        targets.map((c) => (kind === 'start' ? api.startCluster(c.cluster_id) : api.stopCluster(c.cluster_id))),
+      )
+      const failures = results.flatMap((r, i) =>
+        r.status === 'rejected'
+          ? [`${clusterName(targets[i])}：${r.reason instanceof Error ? r.reason.message : String(r.reason)}`]
+          : [],
+      )
+      const ok = targets.length - failures.length
+      const doneKey = kind === 'start' ? 'dashboard.batchStartDone' : 'dashboard.batchStopDone'
+      if (failures.length === 0) {
+        toast.success(t(doneKey, { count: ok }))
+      } else if (ok === 0) {
+        toast.error(t(kind === 'start' ? 'dashboard.batchStartFailed' : 'dashboard.batchStopFailed'), {
+          description: failures.join('\n'),
+        })
+      } else {
+        toast.warning(t('dashboard.batchPartial', { ok, total: targets.length }), {
+          description: failures.join('\n'),
+        })
+      }
+      if (kind === 'stop') setStopAllConfirmOpen(false)
+      afterClusterChange()
     } finally {
       setBatchBusy(false)
     }
   }
 
-  const runBatchStop = async () => {
-    const running = operableClusters.filter(
-      (c) => c.master_status.state === 'running' || c.caves_status?.state === 'running',
-    )
-    if (running.length === 0) return
-    setBatchBusy(true)
-    try {
-      await Promise.allSettled(running.map((c) => api.stopCluster(c.cluster_id)))
-      toast.success(t('common.actionSuccess'))
-      setStopAllConfirmOpen(false)
-      void qc.invalidateQueries({ queryKey: ['clusters'] })
-    } finally {
-      setBatchBusy(false)
-    }
-  }
+  // has_token is false only when there is no cluster token AND no global default, so the
+  // global default in Settings is the one fix that covers every world: explain it once, here.
+  const tokenMissing = clusters.filter((c) => !c.has_token)
 
   const showHeaderCreate = isAdmin && clusters.length > 0
-  const serverInstalled = steamStatus ? steamStatus.installed : true
+  const showFilter = clusters.length >= FILTER_MIN_CLUSTERS
+  // A batch button for a single world just duplicates that world's own button.
+  const showBatchStart = stoppedOperable.length >= 2
+  const showBatchStop = batchStopTargets.length >= 2
 
-  const dynamicSubtitle = [
-    metrics ? `${metrics.os}/${metrics.arch}` : null,
-    t('dashboard.subtitleSummary', { total: clusters.length, running: onlineClusters.length }),
-  ]
-    .filter(Boolean)
-    .join(' · ')
+  const awakeClusters = filteredClusters.filter(isClusterActive)
+  const asleepClusters = filteredClusters.filter((c) => !isClusterActive(c))
 
-  const diskPercent = metrics?.disk_percent ?? 0
-  const diskSub =
-    diskPercent >= 85
-      ? t('dashboard.diskCriticalSub')
-      : diskPercent >= 70
-        ? t('dashboard.diskElevatedSub')
-        : t('dashboard.diskNormalSub')
+  const subtitle =
+    clusters.length > 0
+      ? t('dashboard.subtitleSummary', {
+          total: clusters.length,
+          running: onlineClusters.length,
+          players: totalOnlinePlayers,
+        })
+      : t('dashboard.subtitle')
 
   return (
     <div className="space-y-6">
       <PageHeader
         title={t('dashboard.title')}
-        subtitle={dynamicSubtitle || t('dashboard.subtitle')}
+        subtitle={subtitle}
         actions={
-          <>
-            {operableClusters.length > 1 && (
-              <>
-                <Button size="sm" variant="outline" disabled={batchBusy} onClick={() => void runBatchStart()}>
-                  <Play className="h-3.5 w-3.5" />
-                  {t('dashboard.startAllClusters')}
-                </Button>
-                {onlineClusters.length > 0 && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={batchBusy}
-                    onClick={() => setStopAllConfirmOpen(true)}
-                  >
-                    <Square className="h-3.5 w-3.5" />
-                    {t('dashboard.stopAllClusters')}
-                  </Button>
-                )}
-              </>
-            )}
-            {showHeaderCreate && (
-              <>
-                <Button variant="outline" onClick={() => setImportOpen(true)}>
-                  <Upload className="h-3.5 w-3.5" />
-                  {t('importCluster.btn')}
-                </Button>
-                <Button onClick={() => navigate('/clusters/new')}>
-                  <Plus className="h-3.5 w-3.5" />
-                  {t('dashboard.createCluster')}
-                </Button>
-              </>
-            )}
-          </>
+          showHeaderCreate ? (
+            <>
+              <Button variant="outline" onClick={() => setImportOpen(true)}>
+                <Upload className="h-3.5 w-3.5" />
+                {t('importCluster.btn')}
+              </Button>
+              <Button variant="outline" onClick={() => navigate('/clusters/new')}>
+                <Plus className="h-3.5 w-3.5" />
+                {t('dashboard.createCluster')}
+              </Button>
+            </>
+          ) : undefined
         }
       />
 
-      {/* Compact Single-Line Server Missing Notice */}
-      {isAdmin && steamStatus && !steamStatus.installed && clusters.length > 0 && (
-        <div
-          role="status"
-          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-3.5 py-2.5 text-[13px] text-muted-foreground"
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="h-[7px] w-[7px] rounded-full bg-amber-500 shrink-0" aria-hidden="true" />
-            <span className="text-foreground/90">{t('dashboard.steamNotInstalledBanner')}</span>
-          </div>
-          <Link
-            to="/steam"
-            className="inline-flex items-center gap-1 text-[13px] font-medium text-foreground hover:opacity-80 transition-opacity shrink-0"
-          >
-            <span>{t('dashboard.goSteamSetup')}</span>
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
-        </div>
-      )}
+      <SetupNotices
+        items={[
+          ...(isAdmin && steamStatus && !steamStatus.installed && clusters.length > 0
+            ? [
+                {
+                  key: 'server',
+                  title: t('dashboard.serverMissingTitle'),
+                  desc: t('dashboard.serverMissingDesc'),
+                  href: '/steam',
+                  action: t('dashboard.goSteamSetup'),
+                },
+              ]
+            : []),
+          ...(tokenMissing.length > 0
+            ? [
+                {
+                  key: 'token',
+                  title:
+                    tokenMissing.length === 1
+                      ? t('dashboard.tokenMissingOneTitle', { name: clusterName(tokenMissing[0]) })
+                      : t('dashboard.tokensMissingTitle', { count: tokenMissing.length }),
+                  desc:
+                    t('dashboard.tokenMissingWhy') +
+                    t('dashboard.tokenWhere') +
+                    (isAdmin ? t('dashboard.tokensMissingFix') : t('dashboard.tokenAskOwner')),
+                  href: isAdmin ? '/settings' : undefined,
+                  action: t('dashboard.goSettingsToken'),
+                },
+              ]
+            : []),
+        ]}
+      />
 
-      {/* Unified 4-Cell Precision Host Telemetry Strip */}
-      <section aria-label={t('dashboard.liveTelemetry')} className="rounded-[10px] surface-card overflow-hidden">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 lg:divide-x divide-border">
-          <TelemetryCell
-            label={t('dashboard.hostCpu')}
-            value={metrics ? String(metrics.cpu_percent) : '—'}
-            unit={metrics ? '%' : undefined}
-            desc={t('dashboard.hostCpuSub')}
-            percent={metrics?.cpu_percent ?? 0}
-            samples={history.cpu}
-          />
-          <TelemetryCell
-            label={t('dashboard.hostMem')}
-            meta={
-              metrics
-                ? `${(metrics.memory_used_mb / 1024).toFixed(1)} / ${(metrics.memory_total_mb / 1024).toFixed(1)} GB`
-                : undefined
-            }
-            value={metrics ? String(metrics.memory_percent) : '—'}
-            unit={metrics ? '%' : undefined}
-            desc={t('dashboard.hostMemSub')}
-            percent={metrics?.memory_percent ?? 0}
-            samples={history.mem}
-            className="sm:border-l lg:border-l-0 border-border"
-          />
-          <TelemetryCell
-            label={t('dashboard.hostDisk')}
-            meta={metrics ? `${metrics.disk_used_gb} / ${metrics.disk_total_gb} GB` : undefined}
-            value={metrics ? String(metrics.disk_percent) : '—'}
-            unit={metrics ? '%' : undefined}
-            desc={diskSub}
-            percent={diskPercent}
-            samples={history.disk}
-            className="sm:border-t lg:border-t-0 border-border"
-          />
-          <TelemetryCell
-            label={t('dashboard.onlinePlayersCard')}
-            value={String(totalOnlinePlayers)}
-            unit={t('dashboard.onlinePlayersUnit') || undefined}
-            desc={t('dashboard.runningClustersSub', { running: onlineClusters.length, total: clusters.length })}
-            percent={0}
-            samples={history.players.length > 0 ? history.players : [totalOnlinePlayers]}
-            className="sm:border-t sm:border-l lg:border-t-0 lg:border-l-0 border-border"
-          />
-        </div>
-      </section>
-
-      {/* Clusters Section */}
-      <section className="space-y-3">
+      <section aria-labelledby="dashboard-worlds-heading" className="space-y-3">
         {clusters.length > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2.5">
             <div className="flex items-center gap-2">
-              <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">
+              <h2
+                id="dashboard-worlds-heading"
+                className="text-[15px] font-semibold tracking-[-0.01em] text-foreground"
+              >
                 {t('dashboard.clustersHeading')}
               </h2>
-              <span className="inline-flex items-center justify-center rounded-full border border-[var(--border-strong)] px-2 py-0 text-[11.5px] leading-[18px] font-mono tabular-nums text-muted-foreground">
+              <span className="inline-flex items-center justify-center rounded-full border border-[var(--border-strong)] px-2 text-[12px] leading-[18px] tabular-nums text-muted-foreground">
                 {clusters.length}
               </span>
             </div>
-            <div
-              role="group"
-              aria-label={t('dashboard.clustersHeading')}
-              className="inline-flex items-center rounded-lg border border-border bg-card p-0.5 text-xs"
-            >
-              {(
-                [
-                  { key: 'all', label: t('dashboard.filterAll') },
-                  { key: 'running', label: t('dashboard.filterRunning') },
-                  { key: 'stopped', label: t('dashboard.filterStopped') },
-                ] as const
-              ).map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  onClick={() => setClusterFilter(item.key)}
-                  className={cn(
-                    'rounded-[6px] px-2.5 py-1 transition-colors cursor-pointer',
-                    clusterFilter === item.key
-                      ? 'bg-[var(--surface-hover)] text-foreground font-medium'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
+            <div className="flex flex-wrap items-center gap-2">
+              {showFilter && (
+                <div
+                  role="group"
+                  aria-label={t('dashboard.filterLabel')}
+                  className="inline-flex items-center rounded-lg border border-border bg-card p-0.5 text-xs"
                 >
-                  {item.label}
-                </button>
-              ))}
+                  {(
+                    [
+                      { key: 'all', label: t('dashboard.filterAll') },
+                      { key: 'running', label: t('dashboard.filterRunning') },
+                      { key: 'stopped', label: t('dashboard.filterStopped') },
+                    ] as const
+                  ).map((item) => (
+                    <button
+                      key={item.key}
+                      type="button"
+                      aria-pressed={clusterFilter === item.key}
+                      onClick={() => setClusterFilter(item.key)}
+                      className={cn(
+                        'min-h-8 rounded-[6px] px-3 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        clusterFilter === item.key
+                          ? 'bg-[var(--surface-hover)] text-foreground font-medium'
+                          : 'text-muted-foreground hover:text-foreground',
+                      )}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {showBatchStart && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={batchBusy || batchStartTargets.length === 0}
+                  title={batchStartTargets.length === 0 ? (startBlockReason(stoppedOperable[0]) ?? undefined) : undefined}
+                  onClick={() => void runBatch('start', batchStartTargets)}
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  {t('dashboard.startAllClusters')}
+                </Button>
+              )}
+              {showBatchStop && (
+                <Button size="sm" variant="ghost" disabled={batchBusy} onClick={() => setStopAllConfirmOpen(true)}>
+                  <Square className="h-3 w-3" />
+                  {t('dashboard.stopAllClusters')}
+                </Button>
+              )}
             </div>
           </div>
         )}
@@ -387,378 +385,60 @@ export function DashboardPage() {
         ) : clustersErrorFlag ? (
           <QueryErrorCard error={clustersError} onRetry={() => void refetchClusters()} />
         ) : clusters.length === 0 ? (
-          <div className="rounded-[10px] border border-dashed border-border bg-card py-11 px-6 flex flex-col items-center justify-center text-center gap-5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-[var(--surface-elevated)] text-foreground">
-              <Server className="h-5 w-5" />
-            </div>
-            <div className="space-y-1 max-w-lg">
-              <h2 className="text-base font-semibold tracking-[-0.015em]">{t('dashboard.emptyTitle')}</h2>
-              <p className="text-xs text-muted-foreground leading-relaxed text-pretty">{t('dashboard.emptyDesc')}</p>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 w-full max-w-2xl text-left">
-              <div
-                className={cn(
-                  'rounded-lg border px-3.5 py-3 text-xs space-y-1',
-                  serverInstalled ? 'border-emerald-600/30 bg-emerald-500/5' : 'border-[var(--border-strong)] bg-[var(--surface-elevated)]',
-                )}
-              >
-                <div className="flex items-center justify-between gap-1 text-[11px] font-medium">
-                  <span className="font-mono text-muted-foreground">01</span>
-                  {serverInstalled ? (
-                    <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
-                      <CheckCircle2 className="h-3 w-3" />
-                      {t('dashboard.stepInstalled')}
-                    </span>
-                  ) : (
-                    <span className="text-amber-700 dark:text-amber-400">{t('dashboard.stepPending')}</span>
-                  )}
-                </div>
-                <div className="font-medium text-foreground">{t('dashboard.quickStartStep1')}</div>
-              </div>
-              <div
-                className={cn(
-                  'rounded-lg border px-3.5 py-3 text-xs space-y-1',
-                  serverInstalled ? 'border-[var(--border-strong)] bg-[var(--surface-elevated)]' : 'border-border bg-background/50 text-muted-foreground',
-                )}
-              >
-                <div className="flex items-center justify-between gap-1 text-[11px] font-medium">
-                  <span className="font-mono text-muted-foreground">02</span>
-                  {serverInstalled && <span className="text-foreground">{t('dashboard.stepPending')}</span>}
-                </div>
-                <div className="font-medium text-foreground">{t('dashboard.quickStartStep2')}</div>
-              </div>
-              <div className="rounded-lg border border-border bg-background/50 px-3.5 py-3 text-xs space-y-1 text-muted-foreground">
-                <div className="font-mono text-[11px]">03</div>
-                <div className="font-medium text-foreground">{t('dashboard.quickStartStep3')}</div>
-              </div>
-            </div>
-            {isAdmin && (
-              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-                {!serverInstalled ? (
-                  <>
-                    <Link to="/steam" className={buttonVariants({ variant: 'default' })}>
-                      <Download className="h-3.5 w-3.5" />
-                      {t('dashboard.goSteamSetup')}
-                    </Link>
-                    <Button variant="outline" onClick={() => navigate('/clusters/new')}>
-                      <Plus className="h-3.5 w-3.5" />
-                      {t('dashboard.createCluster')}
-                    </Button>
-                    <Button variant="outline" onClick={() => setImportOpen(true)}>
-                      <Upload className="h-3.5 w-3.5" />
-                      {t('importCluster.btn')}
-                    </Button>
-                  </>
-                ) : (
-                  <>
-                    <Button onClick={() => navigate('/clusters/new')}>
-                      <Plus className="h-3.5 w-3.5" />
-                      {t('dashboard.createCluster')}
-                    </Button>
-                    <Button variant="outline" onClick={() => setImportOpen(true)}>
-                      <Upload className="h-3.5 w-3.5" />
-                      {t('importCluster.btn')}
-                    </Button>
-                    <Link to="/steam" className={buttonVariants({ variant: 'ghost' })}>
-                      <Download className="h-3.5 w-3.5" />
-                      {t('dashboard.goSteamSetup')}
-                    </Link>
-                  </>
-                )}
-              </div>
-            )}
+          <EmptyLobby
+            isAdmin={isAdmin}
+            serverInstalled={serverInstalled}
+            onCreate={() => navigate('/clusters/new')}
+            onImport={() => setImportOpen(true)}
+          />
+        ) : filteredClusters.length === 0 ? (
+          <div className="rounded-[10px] border border-dashed border-border py-10 px-4 text-center text-[13px] text-muted-foreground">
+            {t('dashboard.filterEmpty')}
           </div>
         ) : (
-          <div className="rounded-[10px] surface-card overflow-hidden">
-            {/* Desktop Table Header */}
-            <div className="hidden lg:grid lg:grid-cols-[minmax(150px,1.1fr)_84px_minmax(196px,1.3fr)_84px_minmax(230px,1.7fr)_184px] items-center gap-5 px-4 py-2.5 border-b border-border text-xs text-muted-foreground">
-              <span>{t('dashboard.colCluster')}</span>
-              <span>{t('dashboard.colStatus')}</span>
-              <span>{t('dashboard.colWorld')}</span>
-              <span>{t('dashboard.colPlayers')}</span>
-              <span>{t('dashboard.colShards')}</span>
-              <span />
-            </div>
-
-            {filteredClusters.length === 0 ? (
-              <div className="py-10 px-4 text-center text-xs text-muted-foreground">{t('dashboard.filterEmpty')}</div>
-            ) : (
-              <div className="divide-y divide-border">
-                {filteredClusters.map((c) => {
-                  const compositeHealth = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
-                  const isAnyActive =
-                    c.master_status.state === 'running' ||
-                    c.master_status.state === 'starting' ||
-                    (c.caves_enabled &&
-                      (c.caves_status?.state === 'running' || c.caves_status?.state === 'starting'))
-                  const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
-                  const players = c.world_info?.online_players?.length ?? 0
-                  const playerRatio = c.max_players > 0 ? Math.min(1, players / c.max_players) : 0
-                  const isRowBusy = busyClusterId === c.cluster_id || batchBusy
-                  const isRowRestarting = busyClusterId === c.cluster_id && restartMut.isPending
-                  const hasWorldClock = Boolean(
-                    c.world_info?.season && c.world_info.season !== 'unknown' && c.world_info.day > 0,
-                  )
-                  const phaseLabel =
-                    c.world_info?.phase && c.world_info.phase !== 'unknown'
-                      ? t(`dashboard.phases.${c.world_info.phase}`, '')
-                      : ''
-                  const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
-                  const seasonColor = `var(--season-${['winter', 'spring', 'summer'].includes(c.world_info?.season) ? c.world_info.season : 'autumn'})`
-                  const [dayPrefix, daySuffix] = t('dashboard.day', { day: '\u0000' }).split('\u0000')
-
-                  return (
-                    <article
+          <div className="space-y-4">
+            {awakeClusters.length > 0 && (
+              <div className="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,21rem),1fr))]">
+                {awakeClusters.map((c) => (
+                  <WorldCard
+                    key={c.cluster_id}
+                    cluster={c}
+                    connectHost={connectHost}
+                    hostIsGuess={!publicIpData?.ip}
+                    isAdmin={isAdmin}
+                    busy={busyClusterId === c.cluster_id || batchBusy}
+                    restarting={busyClusterId === c.cluster_id && restartMut.isPending}
+                    onStop={() => requestClusterAction('stop', c)}
+                    onRestart={() => requestClusterAction('restart', c)}
+                  />
+                ))}
+              </div>
+            )}
+            {asleepClusters.length > 0 && (
+              <div className="space-y-2">
+                {awakeClusters.length > 0 && (
+                  <h3 className="text-[13px] font-medium text-muted-foreground">
+                    {t('dashboard.asleepHeading', { count: asleepClusters.length })}
+                  </h3>
+                )}
+                <ul className="rounded-xl surface-card divide-y divide-border">
+                  {asleepClusters.map((c) => (
+                    <SleepingWorldRow
                       key={c.cluster_id}
-                      className="relative grid grid-cols-1 lg:grid-cols-[minmax(150px,1.1fr)_84px_minmax(196px,1.3fr)_84px_minmax(230px,1.7fr)_184px] items-start lg:items-center gap-3.5 lg:gap-5 px-4 py-3.5 hover:bg-[var(--surface-hover)]/35 transition-colors"
-                    >
-                      {hasWorldClock && (
-                        <span
-                          aria-hidden="true"
-                          className="absolute left-0 top-3 bottom-3 w-[3px] rounded-r-full"
-                          style={{ background: seasonColor }}
-                        />
-                      )}
-                      {/* Col 1: Name + ID + Missing Token */}
-                      <div className="min-w-0">
-                        <div className="flex items-center justify-between gap-2 lg:block">
-                          <Link
-                            to={overviewHref}
-                            className="text-[14px] font-semibold tracking-[-0.01em] text-foreground hover:underline truncate block"
-                          >
-                            {c.cluster_name || c.cluster_id}
-                          </Link>
-                          <div className="lg:hidden shrink-0">
-                            <ShardStateBadge state={compositeHealth} />
-                          </div>
-                        </div>
-                        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                          <code className="text-[11.5px] text-muted-foreground">{c.cluster_id}</code>
-                          <span className="text-muted-foreground/60">·</span>
-                          <span className="text-muted-foreground">
-                            {t(`dashboard.modes.${c.game_mode}`, c.game_mode)}
-                          </span>
-                          {!c.has_token && (
-                            <Link
-                              to={`/clusters/${encodeURIComponent(c.cluster_id)}/config`}
-                              title={t('dashboard.tokenMissingAction')}
-                              className="inline-flex items-center gap-1 text-[11.5px] font-medium text-amber-700 dark:text-amber-400 hover:underline"
-                            >
-                              <AlertTriangle className="h-3 w-3 shrink-0" />
-                              <span>{t('dashboard.tokenMissing')}</span>
-                            </Link>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Col 2: Status (desktop) */}
-                      <div className="hidden lg:flex items-center">
-                        <ShardStateBadge state={compositeHealth} />
-                      </div>
-
-                      {/* Col 3: World Clock */}
-                      <div className="flex items-center gap-3 min-w-0">
-                        <DSTClockDial phase={c.world_info?.phase} className="h-9 w-9 shrink-0" />
-                        <div className="min-w-0 tabular-nums">
-                          {hasWorldClock ? (
-                            <>
-                              <div className="flex items-baseline gap-1 leading-none whitespace-nowrap">
-                                <span className="text-[12px] text-muted-foreground">{dayPrefix}</span>
-                                <span className="font-display text-[22px] text-foreground">{c.world_info.day}</span>
-                                <span className="text-[12px] text-muted-foreground">{daySuffix}</span>
-                                <span className="ml-1.5 text-[12.5px] font-medium" style={{ color: seasonColor }}>
-                                  {t(`dashboard.seasons.${c.world_info.season}`, c.world_info.season)}
-                                </span>
-                              </div>
-                              <div className="mt-1 text-[11.5px] text-muted-foreground truncate">
-                                {[
-                                  phaseLabel,
-                                  c.world_info.remaining_days_in_season > 0
-                                    ? t('overview.seasonRemaining', { days: c.world_info.remaining_days_in_season })
-                                    : null,
-                                ]
-                                  .filter(Boolean)
-                                  .join(' · ') || '—'}
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className="text-[13px] text-muted-foreground leading-snug">
-                                {t('dashboard.seasons.unknown')}
-                              </div>
-                              <div className="text-[11.5px] text-muted-foreground/75">—</div>
-                            </>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Col 4: Players */}
-                      <div className="w-full max-w-[140px] lg:max-w-none tabular-nums">
-                        <div className="text-[13px] font-medium text-foreground">
-                          {players} <span className="text-muted-foreground font-normal">/ {c.max_players}</span>
-                        </div>
-                        <div className="mt-1.5 h-[3px] w-full rounded-full bg-secondary overflow-hidden">
-                          <div
-                            className="h-full w-full origin-left bg-foreground/65 [transition:transform_220ms_var(--ease-out)]"
-                            style={{ transform: `scaleX(${playerRatio})` }}
-                          />
-                        </div>
-                      </div>
-
-                      {/* Col 5: Shards */}
-                      <div className="grid grid-cols-2 gap-3 min-w-0">
-                        <ShardCell
-                          label={t('common.masterShort')}
-                          port={c.master_port}
-                          connectHost={connectHost}
-                          password={c.cluster_password}
-                          status={c.master_status}
-                        />
-                        {c.caves_enabled && c.caves_status ? (
-                          <ShardCell
-                            label={t('common.cavesShort')}
-                            port={c.caves_port}
-                            connectHost={connectHost}
-                            password={c.cluster_password}
-                            status={c.caves_status}
-                          />
-                        ) : (
-                          <div className="text-xs text-muted-foreground self-center">{t('common.singleWorld')}</div>
-                        )}
-                      </div>
-
-                      {/* Col 6: Actions */}
-                      <div className="flex items-center justify-end gap-1 pt-1 lg:pt-0 border-t border-border/60 lg:border-t-0">
-                        {canOperate && (
-                          <>
-                            {!isAnyActive ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                disabled={isRowBusy}
-                                onClick={() => startMut.mutate(c.cluster_id)}
-                              >
-                                <Play className="h-3.5 w-3.5" />
-                                {t('dashboard.startAll')}
-                              </Button>
-                            ) : (
-                              <>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={isRowBusy}
-                                  onClick={() => requestClusterAction('stop', c)}
-                                >
-                                  <Square className="h-3 w-3" />
-                                  {t('dashboard.stopAll')}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={isRowBusy}
-                                  onClick={() => requestClusterAction('restart', c)}
-                                >
-                                  <RotateCw className={cn('h-3.5 w-3.5', isRowRestarting && 'animate-spin')} />
-                                  {t('dashboard.restartAll')}
-                                </Button>
-                              </>
-                            )}
-                          </>
-                        )}
-                        <Link
-                          to={overviewHref}
-                          className={cn(buttonVariants({ size: 'sm', variant: 'outline' }), 'group ml-0.5')}
-                        >
-                          <span>{t('dashboard.openCluster')}</span>
-                          <ArrowRight className="h-3.5 w-3.5 transition-transform duration-150 motion-safe:group-hover:translate-x-0.5" />
-                        </Link>
-                      </div>
-                    </article>
-                  )
-                })}
+                      cluster={c}
+                      busy={busyClusterId === c.cluster_id || batchBusy}
+                      startBlockReason={startBlockReason(c)}
+                      onStart={() => startMut.mutate(c.cluster_id)}
+                    />
+                  ))}
+                </ul>
               </div>
             )}
           </div>
         )}
       </section>
 
-      {/* Bottom Split: Recent Activity + DST Server Summary (Admin only) */}
-      {isAdmin && (
-        <section className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-4">
-          <div className="rounded-[10px] surface-card overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-border">
-              <h3 className="text-[13.5px] font-semibold text-foreground">{t('dashboard.recentActivity')}</h3>
-              <Link to="/audit" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
-                {t('dashboard.viewAuditLog')}
-              </Link>
-            </div>
-            {recentLogs.length === 0 ? (
-              <div className="px-4 py-8 text-center text-xs text-muted-foreground">
-                {t('dashboard.noRecentActivity')}
-              </div>
-            ) : (
-              <div className="divide-y divide-border">
-                {recentLogs.map((log) => (
-                  <div
-                    key={log.id}
-                    className="grid grid-cols-[68px_1fr_auto] items-center gap-3 px-4 py-2.5 text-[13px]"
-                  >
-                    <time className="font-mono text-xs text-muted-foreground tabular-nums">
-                      {formatShortTime(log.created_at)}
-                    </time>
-                    <div className="min-w-0 truncate text-foreground">
-                      <span>{formatAuditAction(log.action, isEn)}</span>
-                      {log.target && (
-                        <code className="ml-1.5 text-[12px] text-muted-foreground">{log.target}</code>
-                      )}
-                    </div>
-                    <span className="text-xs text-muted-foreground truncate max-w-[96px]">{log.actor}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="rounded-[10px] surface-card overflow-hidden flex flex-col justify-between">
-            <div>
-              <div className="px-4 py-3 border-b border-border">
-                <h3 className="text-[13.5px] font-semibold text-foreground">{t('dashboard.serverCardTitle')}</h3>
-              </div>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2.5 px-4 py-3.5 text-[13px]">
-                <dt className="text-muted-foreground">{t('steam.localVersion')}</dt>
-                <dd
-                  className={cn(
-                    'text-right font-mono tabular-nums',
-                    steamStatus && !steamStatus.installed
-                      ? 'text-amber-700 dark:text-amber-400 font-sans font-medium'
-                      : 'text-foreground',
-                  )}
-                >
-                  {steamStatus
-                    ? steamStatus.installed
-                      ? steamStatus.local_version || '—'
-                      : t('steam.notInstalled')
-                    : '—'}
-                </dd>
-                <dt className="text-muted-foreground">{t('steam.remoteVersion')}</dt>
-                <dd className="text-right font-mono tabular-nums text-foreground">
-                  {steamStatus?.remote_version || '—'}
-                </dd>
-                <dt className="text-muted-foreground">{t('settings.branch')}</dt>
-                <dd className="text-right font-mono text-foreground">{steamStatus?.branch || 'public'}</dd>
-              </dl>
-            </div>
-            <div className="px-4 pb-4 pt-1">
-              <Link to="/steam" className={cn(buttonVariants({ variant: 'outline' }), 'w-full')}>
-                <Download className="h-3.5 w-3.5" />
-                {steamStatus && (!steamStatus.installed || steamStatus.update_needed)
-                  ? t('dashboard.goSteamSetup')
-                  : t('dashboard.serverManageBtn')}
-              </Link>
-            </div>
-          </div>
-        </section>
-      )}
+      <HostStrip metrics={metrics} steamStatus={steamStatus} isAdmin={isAdmin} />
 
       <ImportClusterDialog
         open={importOpen}
@@ -779,17 +459,13 @@ export function DashboardPage() {
             ? t('dashboard.restartOnlineConfirmTitle')
             : t('dashboard.stopOnlineConfirmTitle')
         }
-        description={
-          pendingAction?.kind === 'restart'
-            ? t('dashboard.restartOnlineConfirmDesc', {
-                name: pendingAction.cluster.cluster_name || pendingAction.cluster.cluster_id,
-                count: pendingAction.cluster.world_info?.online_players?.length ?? 0,
-              })
-            : t('dashboard.stopOnlineConfirmDesc', {
-                name: pendingAction?.cluster.cluster_name || pendingAction?.cluster.cluster_id || '',
-                count: pendingAction?.cluster.world_info?.online_players?.length ?? 0,
-              })
-        }
+        description={t(
+          pendingAction?.kind === 'restart' ? 'dashboard.restartOnlineConfirmDesc' : 'dashboard.stopOnlineConfirmDesc',
+          {
+            name: pendingAction ? clusterName(pendingAction.cluster) : '',
+            count: pendingAction?.cluster.world_info?.online_players?.length ?? 0,
+          },
+        )}
         confirmLabel={pendingAction?.kind === 'restart' ? t('dashboard.restartAll') : t('dashboard.stopAll')}
         tone="warning"
         loading={stopMut.isPending || restartMut.isPending}
@@ -798,9 +474,16 @@ export function DashboardPage() {
       <ConfirmDialog
         open={stopAllConfirmOpen}
         onClose={() => setStopAllConfirmOpen(false)}
-        onConfirm={() => void runBatchStop()}
-        title={t('dashboard.stopAllConfirmTitle')}
-        description={t('dashboard.stopAllConfirmDesc', { count: onlineClusters.length })}
+        onConfirm={() => void runBatch('stop', batchStopTargets)}
+        title={t('dashboard.stopAllConfirmTitle', { count: batchStopTargets.length })}
+        description={
+          playersOnStopTotal > 0
+            ? t('dashboard.stopAllConfirmDescPlayers', {
+                count: playersOnStopTotal,
+                detail: playersOnStop.map((x) => t('dashboard.playersInWorld', { name: x.name, count: x.count })).join('、'),
+              })
+            : t('dashboard.stopAllConfirmDescEmpty')
+        }
         confirmLabel={t('dashboard.stopAllClusters')}
         tone="warning"
         loading={batchBusy}
@@ -809,114 +492,671 @@ export function DashboardPage() {
   )
 }
 
-function TelemetryCell({
-  label,
-  meta,
-  value,
-  unit,
-  desc,
-  percent,
-  samples,
-  className,
-}: {
-  label: string
-  meta?: string
-  value: string
-  unit?: string
-  desc?: string
-  percent: number
-  samples: number[]
-  className?: string
-}) {
+interface SetupNotice {
+  key: string
+  title: string
+  desc: string
+  href?: string
+  action: string
+}
+
+/** Blockers before friends can play: one item reads as a banner, several as a short checklist. */
+function SetupNotices({ items }: { items: SetupNotice[] }) {
   const { t } = useTranslation()
-  const isCritical = percent >= 85
-  const isElevated = percent >= 70 && percent < 85
-  const sparkTone = isCritical ? 'red' : isElevated ? 'amber' : 'neutral'
+  if (items.length === 0) return null
 
   return (
-    <div className={cn('px-4.5 py-4 flex flex-col justify-between gap-2.5', className)}>
-      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span className="truncate">{label}</span>
-        {meta && <code className="text-[11.5px] tabular-nums text-muted-foreground shrink-0">{meta}</code>}
-      </div>
+    <div role="status" className="rounded-[10px] border border-amber-500/35 bg-amber-500/[0.07]">
+      {items.length > 1 && (
+        <p className="flex items-center gap-2 px-4 pt-3.5 text-[13.5px] font-semibold text-foreground">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden="true" />
+          {t('dashboard.setupRemaining', { count: items.length })}
+        </p>
+      )}
+      <ul className={cn(items.length > 1 && 'divide-y divide-amber-500/20')}>
+        {items.map((item) => (
+          <li
+            key={item.key}
+            className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="flex items-start gap-3 min-w-0">
+              {items.length === 1 ? (
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden="true" />
+              ) : (
+                <span className="mt-[7px] ml-[5px] mr-[3px] h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
+              )}
+              <div className="min-w-0 space-y-0.5">
+                <p className={cn('text-foreground', items.length === 1 ? 'text-[13.5px] font-semibold' : 'text-[13px] font-medium')}>
+                  {item.title}
+                </p>
+                <p className="text-[13px] text-muted-foreground text-pretty">{item.desc}</p>
+              </div>
+            </div>
+            {item.href && (
+              <Link
+                to={item.href}
+                className={cn(buttonVariants({ variant: 'warning', size: 'sm' }), 'shrink-0 self-start sm:self-auto')}
+              >
+                {item.action}
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
-      <div>
-        <div
-          className={cn(
-            'font-display text-[30px] leading-none',
-            isCritical
-              ? 'text-red-700 dark:text-red-400'
-              : isElevated
-                ? 'text-amber-700 dark:text-amber-400'
-                : 'text-foreground',
-          )}
-          title={
-            isCritical
-              ? t('dashboard.highUsageAlert')
-              : isElevated
-                ? t('dashboard.elevatedUsageAlert')
-                : undefined
-          }
-        >
-          {value}
-          {unit && <span className="ml-1 text-[14px] font-normal text-muted-foreground tracking-normal">{unit}</span>}
+const SEASON_ICON: Record<string, typeof Flame> = {
+  autumn: Flame,
+  winter: Snowflake,
+  spring: Flower2,
+  summer: Sun,
+}
+
+function WorldCard({
+  cluster: c,
+  connectHost,
+  hostIsGuess,
+  isAdmin,
+  busy,
+  restarting,
+  onStop,
+  onRestart,
+}: {
+  cluster: ClusterSummary
+  connectHost: string
+  hostIsGuess: boolean
+  isAdmin: boolean
+  busy: boolean
+  restarting: boolean
+  onStop: () => void
+  onRestart: () => void
+}) {
+  const { t, i18n } = useTranslation()
+  const isEn = i18n.language === 'en-US'
+  const [detailsOpen, setDetailsOpen] = useState(false)
+
+  const name = clusterName(c)
+  const health = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
+  const running = c.master_status.state === 'running'
+  const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
+  const players = c.world_info?.online_players ?? []
+  const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
+  const detailsId = `world-details-${c.cluster_id}`
+  const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
+
+  return (
+    <article aria-label={name} className="@container flex flex-col rounded-xl surface-card surface-interactive overflow-hidden">
+      <header className="flex items-start justify-between gap-3 px-5 pt-4">
+        <div className="min-w-0">
+          <h3 className="min-w-0">
+            <Link
+              to={overviewHref}
+              className="block truncate text-[16px] font-semibold tracking-[-0.015em] text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+            >
+              {name}
+            </Link>
+          </h3>
+          <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+            {t(`dashboard.modes.${c.game_mode}`, c.game_mode)}
+            <span aria-hidden="true" className="mx-1.5 opacity-50">
+              ·
+            </span>
+            {c.caves_enabled ? t('dashboard.worldsForestCaves') : t('dashboard.worldsForestOnly')}
+          </p>
         </div>
-        {desc && <div className="mt-1 text-xs text-muted-foreground truncate">{desc}</div>}
+        <div className="shrink-0 pt-0.5">
+          <ShardStateBadge state={health} />
+        </div>
+      </header>
+
+      <div className="grid flex-1 gap-x-6 gap-y-4 px-5 py-4 @md:grid-cols-2 @3xl:grid-cols-[minmax(0,2fr)_minmax(0,1.15fr)]">
+        <div className="flex min-w-0 flex-col gap-4 @3xl:grid @3xl:grid-cols-2 @3xl:gap-6">
+          <WorldClock cluster={c} running={running} />
+          {running && <PlayerList players={players} max={c.max_players} isEn={isEn} />}
+        </div>
+        {running && (
+          <JoinInfo cluster={c} connectHost={connectHost} hostIsGuess={hostIsGuess} isAdmin={isAdmin} />
+        )}
       </div>
 
-      <div className="pt-0.5">
-        <Sparkline values={samples.length > 0 ? samples : [percent]} tone={sparkTone} height={30} />
+      <div className="border-t border-border">
+        <button
+          type="button"
+          aria-expanded={detailsOpen}
+          aria-controls={detailsId}
+          aria-label={forWorld(t('dashboard.techDetails'))}
+          onClick={() => setDetailsOpen((v) => !v)}
+          className="flex w-full min-h-10 items-center justify-between gap-2 px-5 text-[12.5px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <span>{t('dashboard.techDetails')}</span>
+          <ChevronDown
+            className={cn(
+              'h-3.5 w-3.5 [transition:transform_200ms_var(--ease-out)] motion-reduce:transition-none',
+              detailsOpen && 'rotate-180',
+            )}
+            aria-hidden="true"
+          />
+        </button>
+        <CollapsibleContent open={detailsOpen}>
+          <div id={detailsId} className="space-y-2 px-5 pb-4">
+            <ShardDetail label={t('common.masterShort')} port={c.master_port} status={c.master_status} cluster={c} connectHost={connectHost} />
+            {c.caves_enabled && c.caves_status && (
+              <ShardDetail label={t('common.cavesShort')} port={c.caves_port} status={c.caves_status} cluster={c} connectHost={connectHost} />
+            )}
+            <p className="pt-1 text-[12px] text-muted-foreground">
+              {t('dashboard.clusterDir')} <code className="text-foreground/85">{c.cluster_id}</code>
+              {c.auto_restart && (
+                <>
+                  <span aria-hidden="true" className="mx-1.5 opacity-50">
+                    ·
+                  </span>
+                  {t('dashboard.autoRestartOn')}
+                </>
+              )}
+            </p>
+          </div>
+        </CollapsibleContent>
+      </div>
+
+      <footer className="flex flex-wrap items-center justify-end gap-x-2 gap-y-2 border-t border-border px-5 py-3">
+        {canOperate && (
+          <>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={onStop} aria-label={forWorld(t('dashboard.stopAll'))}>
+              <Square className="h-3 w-3" />
+              {t('dashboard.stopAll')}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={onRestart} aria-label={forWorld(t('dashboard.restartAll'))}>
+              <RotateCw className={cn('h-3.5 w-3.5', restarting && 'animate-spin')} />
+              {t('dashboard.restartAll')}
+            </Button>
+          </>
+        )}
+        <Link
+          to={overviewHref}
+          aria-label={forWorld(t('dashboard.openCluster'))}
+          className={cn(buttonVariants({ size: 'sm', variant: 'outline' }), 'group')}
+        >
+          <span>{t('dashboard.openCluster')}</span>
+          <ArrowRight className="h-3.5 w-3.5 transition-transform duration-150 motion-safe:group-hover:translate-x-0.5" />
+        </Link>
+      </footer>
+    </article>
+  )
+}
+
+/** A world that is not running: one quiet line, so the lit campfires above keep the attention. */
+function SleepingWorldRow({
+  cluster: c,
+  busy,
+  startBlockReason,
+  onStart,
+}: {
+  cluster: ClusterSummary
+  busy: boolean
+  startBlockReason: string | null
+  onStart: () => void
+}) {
+  const { t } = useTranslation()
+  const name = clusterName(c)
+  const health = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
+  const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
+  const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
+  const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
+  const note = !canOperate ? t('dashboard.needOperator') : startBlockReason
+
+  return (
+    <li className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-5">
+      <DSTClockDial className="h-8 w-8 opacity-60" />
+      <div className="min-w-0 flex-1 basis-48">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Link
+            to={overviewHref}
+            className="truncate text-[14px] font-semibold text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+          >
+            {name}
+          </Link>
+          <ShardStateBadge state={health} />
+        </div>
+        <p className="mt-0.5 truncate text-[12.5px] text-muted-foreground">
+          {[
+            t(`dashboard.modes.${c.game_mode}`, c.game_mode),
+            c.caves_enabled ? t('dashboard.worldsForestCaves') : t('dashboard.worldsForestOnly'),
+            t('dashboard.maxPlayers', { count: c.max_players }),
+          ].join(' · ')}
+        </p>
+      </div>
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
+        {note && <span className="text-[12.5px] text-muted-foreground">{note}</span>}
+        {canOperate && (
+          <Button size="sm" disabled={busy || !!startBlockReason} onClick={onStart} aria-label={forWorld(t('dashboard.startWorld'))}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {t('dashboard.startWorld')}
+          </Button>
+        )}
+        <Link
+          to={overviewHref}
+          aria-label={forWorld(t('dashboard.openCluster'))}
+          className={cn(buttonVariants({ size: 'sm', variant: 'outline' }), 'group')}
+        >
+          <span>{t('dashboard.openCluster')}</span>
+          <ArrowRight className="h-3.5 w-3.5 transition-transform duration-150 motion-safe:group-hover:translate-x-0.5" />
+        </Link>
+      </div>
+    </li>
+  )
+}
+
+/** The campfire: lit once the world reports its day and season, waking until then. */
+function WorldClock({ cluster: c, running }: { cluster: ClusterSummary; running: boolean }) {
+  const { t } = useTranslation()
+  const info = c.world_info
+  const known = Boolean(info?.season && info.season !== 'unknown' && info.day > 0)
+  const SeasonIcon = SEASON_ICON[info?.season] ?? Flame
+  const phaseLabel = info?.phase && info.phase !== 'unknown' ? t(`dashboard.phases.${info.phase}`, '') : ''
+  const [dayPrefix, daySuffix] = t('dashboard.day', { day: '\u0000' }).split('\u0000')
+  const lit = running && known
+
+  return (
+    <div className="flex items-center gap-3.5 min-w-0">
+      <div className="relative h-14 w-14 shrink-0">
+        {lit && (
+          <span
+            aria-hidden="true"
+            className="absolute -inset-3 rounded-full auth-campfire-breathe"
+            style={{ background: 'radial-gradient(circle, var(--ember-soft) 0%, transparent 68%)' }}
+          />
+        )}
+        <DSTClockDial
+          phase={lit ? info.phase : undefined}
+          className={cn('relative h-14 w-14', !lit && 'opacity-60')}
+        />
+      </div>
+      <div className="min-w-0 tabular-nums">
+        {lit ? (
+          <>
+            <div className="flex items-baseline gap-1 leading-none whitespace-nowrap">
+              <span className="text-[13px] text-muted-foreground">{dayPrefix}</span>
+              <span className="font-display text-[30px] text-foreground">{info.day}</span>
+              <span className="text-[13px] text-muted-foreground">{daySuffix}</span>
+            </div>
+            <div className="mt-1.5 flex items-center gap-1.5 text-[13px] text-foreground">
+              <SeasonIcon
+                className="h-3.5 w-3.5 shrink-0"
+                style={{ color: `var(--season-${info.season})` }}
+                aria-hidden="true"
+              />
+              <span className="font-medium">{t(`dashboard.seasons.${info.season}`, info.season)}</span>
+              {phaseLabel && (
+                <>
+                  <span aria-hidden="true" className="opacity-45">
+                    ·
+                  </span>
+                  <span className="text-muted-foreground">{phaseLabel}</span>
+                </>
+              )}
+            </div>
+            {info.remaining_days_in_season > 0 && (
+              <div className="mt-0.5 text-[12px] text-muted-foreground">
+                {t('overview.seasonRemaining', { days: info.remaining_days_in_season })}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="text-[14px] font-medium text-foreground">{t('dashboard.worldWaking')}</div>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground text-pretty">{t('dashboard.worldWakingHint')}</div>
+          </>
+        )}
       </div>
     </div>
   )
 }
 
-function ShardCell({
-  label,
-  port,
-  connectHost,
-  password,
-  status,
+function PlayerList({
+  players,
+  max,
+  isEn,
 }: {
-  label: string
-  port?: number
-  connectHost: string
-  password?: string
-  status: ShardStatus
+  players: ClusterSummary['world_info']['online_players']
+  max: number
+  isEn: boolean
 }) {
   const { t } = useTranslation()
-  const state = status.state
-  const active = state === 'running' || state === 'starting'
-  const connectCmd = port ? formatConnectCommand(connectHost, port, password) : ''
-
-  const dotCls =
-    state === 'running'
-      ? 'bg-emerald-600 dark:bg-emerald-500'
-      : state === 'crashed'
-        ? 'bg-red-600 dark:bg-red-500'
-        : state === 'starting' || state === 'stopping'
-          ? 'bg-amber-500'
-          : 'bg-muted-foreground/45'
+  const shown = players.slice(0, MAX_PLAYER_CHIPS)
+  const extra = players.length - shown.length
 
   return (
     <div className="min-w-0">
-      <div className="flex items-center gap-1.5 text-[13px] whitespace-nowrap">
-        {state === 'starting' || state === 'stopping' ? (
-          <Loader2 className="h-3 w-3 animate-spin text-amber-500 shrink-0" aria-hidden="true" />
+      <div className="flex items-baseline gap-1.5 tabular-nums">
+        <span className="text-[13px] text-muted-foreground">{t('dashboard.onlineNow')}</span>
+        <span className="text-[15px] font-semibold text-foreground">{players.length}</span>
+        <span className="text-[13px] text-muted-foreground">/ {max}</span>
+      </div>
+      {players.length > 0 ? (
+        <ul className="mt-2 flex flex-wrap gap-1.5" aria-label={t('dashboard.onlineNow')}>
+          {shown.map((p) => (
+            <li
+              key={p.ku_id || p.name}
+              className="inline-flex max-w-full items-center gap-1 rounded-md bg-[var(--surface-elevated)] px-2 py-1 text-[12.5px]"
+            >
+              <span className="truncate text-foreground">{p.name}</span>
+              {p.prefab && formatCharacterName(p.prefab, isEn) !== p.name && (
+                <>
+                  <span aria-hidden="true" className="text-muted-foreground/60">
+                    ·
+                  </span>
+                  <span className="shrink-0 text-muted-foreground">{formatCharacterName(p.prefab, isEn)}</span>
+                </>
+              )}
+            </li>
+          ))}
+          {extra > 0 && (
+            <li className="inline-flex items-center rounded-md px-1.5 py-1 text-[12.5px] text-muted-foreground">
+              {t('dashboard.morePlayers', { count: extra })}
+            </li>
+          )}
+        </ul>
+      ) : (
+        <p className="mt-2 text-[12.5px] text-muted-foreground">
+          {t('dashboard.noOneOnline')}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** Everything a friend needs to get in, in the words they will type. */
+function JoinInfo({
+  cluster: c,
+  connectHost,
+  hostIsGuess,
+  isAdmin,
+}: {
+  cluster: ClusterSummary
+  connectHost: string
+  hostIsGuess: boolean
+  isAdmin: boolean
+}) {
+  const { t } = useTranslation()
+  const [revealed, setRevealed] = useState(false)
+  const connectCmd = c.master_port ? formatConnectCommand(connectHost, c.master_port, c.cluster_password) : ''
+
+  const copyConnect = async () => {
+    if (!connectCmd) return
+    const ok = await copyTextWithFallback(connectCmd)
+    if (ok) toast.success(t('dashboard.connectCopied'), { description: t('dashboard.connectHowTo') })
+    else toast.error(t('common.copyFailed'))
+  }
+
+  // Without a token the world never reaches the Klei lobby, so join details would be a false promise.
+  if (!c.has_token) {
+    return (
+      <div className="min-w-0 rounded-lg bg-[var(--surface-elevated)]/70 px-3.5 py-3">
+        <div className="text-[12.5px] font-medium text-foreground">{t('dashboard.howToJoin')}</div>
+        <p className="mt-1.5 text-[12.5px] text-muted-foreground text-pretty">{t('dashboard.joinBlockedByToken')}</p>
+        {isAdmin ? (
+          <Link
+            to="/settings"
+            className={cn(buttonVariants({ size: 'sm', variant: 'warning' }), 'mt-2.5 w-full')}
+          >
+            {t('dashboard.goSettingsToken')}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
         ) : (
-          <span className={cn('h-[7px] w-[7px] rounded-full shrink-0', dotCls)} aria-hidden="true" />
+          <p className="mt-1.5 text-[12.5px] text-muted-foreground">{t('dashboard.tokenAskOwnerShort')}</p>
         )}
-        <span className="text-foreground">{label}</span>
-        {port ? (
-          <span className="inline-flex items-center gap-0.5 font-mono text-[11.5px] text-muted-foreground tabular-nums">
-            :{port}
-            <CopyButton value={connectCmd} label={`${t('common.copyConnectCmd')}: ${connectCmd}`} />
-          </span>
-        ) : null}
       </div>
-      <div className="mt-0.5 pl-3.5 text-[11.5px] text-muted-foreground tabular-nums truncate">
-        {active ? `${status.cpu_percent}% · ${Math.round(status.memory_mb)} MB` : t(`common.${state}`)}
+    )
+  }
+
+  return (
+    <div className="min-w-0 rounded-lg bg-[var(--surface-elevated)]/70 px-3.5 py-3">
+      <div className="text-[12.5px] font-medium text-foreground">{t('dashboard.howToJoin')}</div>
+      <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1 text-[12.5px]">
+        <dt className="text-muted-foreground">{t('dashboard.lobbyName')}</dt>
+        <dd className="flex min-w-0 items-center justify-end gap-0.5">
+          <span className="truncate text-foreground">{clusterName(c)}</span>
+          <CopyButton value={clusterName(c)} label={t('dashboard.copyLobbyName')} />
+        </dd>
+        <dt className="text-muted-foreground">{t('dashboard.roomPassword')}</dt>
+        <dd className="flex min-w-0 items-center justify-end gap-0.5">
+          {c.cluster_password ? (
+            <>
+              <span className="truncate font-mono text-foreground">
+                {revealed ? c.cluster_password : '••••••'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setRevealed((v) => !v)}
+                aria-label={revealed ? t('dashboard.hidePassword') : t('dashboard.showPassword')}
+                aria-pressed={revealed}
+                className="relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer"
+              >
+                {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              </button>
+              <CopyButton value={c.cluster_password} label={t('dashboard.copyPassword')} />
+            </>
+          ) : (
+            <span className="py-1.5 text-muted-foreground">{t('dashboard.noPassword')}</span>
+          )}
+        </dd>
+      </dl>
+      {connectCmd && (
+        <div className="mt-2.5">
+          <Button size="sm" variant="outline" className="w-full" onClick={() => void copyConnect()}>
+            <Copy className="h-3.5 w-3.5" />
+            {t('dashboard.copyDirectConnect')}
+          </Button>
+          <p className="mt-1.5 text-[12px] leading-snug text-muted-foreground text-pretty">
+            {t('dashboard.connectHowTo')}
+          </p>
+          {hostIsGuess && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[12px] leading-snug text-amber-800 dark:text-amber-300">
+              <AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden="true" />
+              <span>{t('dashboard.hostGuessWarning', { host: connectHost })}</span>
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ShardDetail({
+  label,
+  port,
+  status,
+  cluster: c,
+  connectHost,
+}: {
+  label: string
+  port?: number
+  status: ShardStatus
+  cluster: ClusterSummary
+  connectHost: string
+}) {
+  const { t } = useTranslation()
+  const active = status.state === 'running' || status.state === 'starting'
+  const connectCmd = port ? formatConnectCommand(connectHost, port, c.cluster_password) : ''
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] tabular-nums">
+      <span className="w-10 shrink-0 font-medium text-foreground">{label}</span>
+      <ShardStateBadge state={status.state} />
+      {port ? (
+        <span className="inline-flex items-center gap-1 text-muted-foreground">
+          {t('dashboard.port')}
+          <code className="text-foreground/85">{port}</code>
+          <CopyButton value={connectCmd} label={`${t('dashboard.copyDirectConnect')}: ${connectCmd}`} />
+        </span>
+      ) : null}
+      {active && (
+        <span className="text-muted-foreground">
+          CPU {status.cpu_percent}% · {t('dashboard.memory')} {Math.round(status.memory_mb)} MB ·{' '}
+          {t('dashboard.uptime')} {formatUptime(status.uptime_sec)}
+        </span>
+      )}
+      {status.restart_count > 0 && (
+        <span className="text-amber-700 dark:text-amber-400">
+          {t('dashboard.crashRestarts', { count: status.restart_count })}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function HostStrip({
+  metrics,
+  steamStatus,
+  isAdmin,
+}: {
+  metrics?: HostMetrics
+  steamStatus?: SteamStatus
+  isAdmin: boolean
+}) {
+  const { t } = useTranslation()
+
+  return (
+    <section
+      aria-label={t('dashboard.hostStripLabel')}
+      className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-[10px] border border-border px-4 py-2.5 text-[12.5px] tabular-nums"
+    >
+      <span className="font-medium text-muted-foreground">{t('dashboard.hostStripLabel')}</span>
+      {metrics ? (
+        <>
+          <HostMetric label="CPU" percent={metrics.cpu_percent} value={`${Math.round(metrics.cpu_percent)}%`} />
+          <HostMetric
+            label={t('dashboard.memory')}
+            percent={metrics.memory_percent}
+            value={`${(metrics.memory_used_mb / 1024).toFixed(1)} / ${(metrics.memory_total_mb / 1024).toFixed(1)} GB`}
+          />
+          <HostMetric
+            label={t('dashboard.disk')}
+            percent={metrics.disk_percent}
+            value={`${metrics.disk_used_gb} / ${metrics.disk_total_gb} GB`}
+          />
+        </>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      )}
+      {steamStatus && (
+        <span className="inline-flex items-center gap-1.5 sm:ml-auto">
+          <span className="text-muted-foreground">{t('dashboard.serverVersion')}</span>
+          {steamStatus.installed ? (
+            <>
+              <code className="text-foreground">{steamStatus.local_version || '—'}</code>
+              {steamStatus.update_needed && isAdmin && (
+                <Link to="/steam" className="font-medium text-amber-800 hover:underline dark:text-amber-300">
+                  {t('dashboard.serverUpdateAvailable')}
+                </Link>
+              )}
+            </>
+          ) : (
+            <span className="text-amber-800 dark:text-amber-300">{t('steam.notInstalled')}</span>
+          )}
+        </span>
+      )}
+    </section>
+  )
+}
+
+function HostMetric({ label, value, percent }: { label: string; value: string; percent: number }) {
+  const { t } = useTranslation()
+  const level = percent >= 85 ? 'critical' : percent >= 70 ? 'elevated' : 'normal'
+
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5',
+        level === 'critical' && 'rounded-md bg-red-500/10 px-1.5 py-0.5 text-red-700 dark:text-red-400',
+        level === 'elevated' && 'rounded-md bg-amber-500/10 px-1.5 py-0.5 text-amber-800 dark:text-amber-300',
+      )}
+    >
+      {level !== 'normal' && <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />}
+      <span className={level === 'normal' ? 'text-muted-foreground' : undefined}>{label}</span>
+      <span className={cn('font-medium', level === 'normal' && 'text-foreground')}>{value}</span>
+      {level !== 'normal' && (
+        <span className="font-medium">
+          {level === 'critical' ? t('dashboard.usageCritical') : t('dashboard.usageElevated')}
+        </span>
+      )}
+    </span>
+  )
+}
+
+function EmptyLobby({
+  isAdmin,
+  serverInstalled,
+  onCreate,
+  onImport,
+}: {
+  isAdmin: boolean
+  serverInstalled: boolean
+  onCreate: () => void
+  onImport: () => void
+}) {
+  const { t } = useTranslation()
+  const steps = [
+    { label: t('dashboard.quickStartStep1'), state: serverInstalled ? 'done' : 'current' },
+    { label: t('dashboard.quickStartStep2'), state: serverInstalled ? 'current' : 'todo' },
+    { label: t('dashboard.quickStartStep3'), state: 'todo' },
+  ] as const
+
+  return (
+    <div className="rounded-xl border border-dashed border-border bg-card py-11 px-6 flex flex-col items-center justify-center text-center gap-5">
+      <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-border bg-[var(--surface-elevated)] text-foreground">
+        <Server className="h-5 w-5" />
       </div>
+      <div className="space-y-1 max-w-lg">
+        <h2 className="text-base font-semibold tracking-[-0.015em]">{t('dashboard.emptyTitle')}</h2>
+        <p className="text-[13px] text-muted-foreground leading-relaxed text-pretty">{t('dashboard.emptyDesc')}</p>
+      </div>
+      <ol className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 w-full max-w-2xl text-left">
+        {steps.map((step, i) => (
+          <li
+            key={step.label}
+            className={cn(
+              'rounded-lg border px-3.5 py-3 text-[13px] space-y-1',
+              step.state === 'done' && 'border-emerald-600/30 bg-emerald-500/5',
+              step.state === 'current' && 'border-[var(--border-strong)] bg-[var(--surface-elevated)]',
+              step.state === 'todo' && 'border-border bg-background/50',
+            )}
+          >
+            <div className="flex items-center justify-between gap-1 text-[12px] font-medium">
+              <span className="tabular-nums text-muted-foreground">{t('dashboard.stepN', { n: i + 1 })}</span>
+              {step.state === 'done' && (
+                <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                  <CheckCircle2 className="h-3 w-3" />
+                  {t('dashboard.stepInstalled')}
+                </span>
+              )}
+              {step.state === 'current' && <span className="text-foreground">{t('dashboard.stepPending')}</span>}
+            </div>
+            <div className="font-medium text-foreground">{step.label}</div>
+          </li>
+        ))}
+      </ol>
+      {isAdmin && (
+        <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+          {!serverInstalled && (
+            <Link to="/steam" className={buttonVariants({ variant: 'default' })}>
+              <Download className="h-3.5 w-3.5" />
+              {t('dashboard.goSteamSetup')}
+            </Link>
+          )}
+          <Button variant={serverInstalled ? 'default' : 'outline'} onClick={onCreate}>
+            <Plus className="h-3.5 w-3.5" />
+            {t('dashboard.createCluster')}
+          </Button>
+          <Button variant="outline" onClick={onImport}>
+            <Upload className="h-3.5 w-3.5" />
+            {t('importCluster.btn')}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }
