@@ -117,6 +117,15 @@ function formatWhen(iso: string | undefined, locale: string): string {
   return d.toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
+const isAutoRecovering = (c: ClusterSummary) =>
+  Boolean(
+    (c.master_status.state === 'crashed' && c.master_status.auto_restart_pending) ||
+      (c.caves_enabled && c.caves_status?.state === 'crashed' && c.caves_status.auto_restart_pending),
+  )
+
+/** The backend's stand-in name for a mod whose metadata was never synced. */
+const PLACEHOLDER_MOD_NAME = /^(工坊模组|Workshop Mod) #\d+$/
+
 /** Most recent crash time across the cluster's shards. */
 const lastCrashAt = (c: ClusterSummary) =>
   [c.master_status.last_crash_at, c.caves_enabled ? c.caves_status?.last_crash_at : undefined]
@@ -571,7 +580,7 @@ export function DashboardPage() {
               </div>
             )}
             {awakeClusters.length > 0 && (
-              <div className="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,21rem),1fr))]">
+              <div className="grid items-start gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,21rem),1fr))]">
                 {awakeClusters.map((c) => (
                   <WorldCard
                     key={c.cluster_id}
@@ -592,7 +601,9 @@ export function DashboardPage() {
               <div id="dashboard-asleep" className="scroll-mt-20 space-y-2">
                 {awakeClusters.length > 0 && (
                   <h3 className="text-[13px] font-medium text-muted-foreground">
-                    {t('dashboard.asleepHeading', { count: asleepClusters.length })}
+                    {t(asleepClusters.some(isClusterActive) ? 'dashboard.asleepStartingHeading' : 'dashboard.asleepHeading', {
+                      count: asleepClusters.length,
+                    })}
                   </h3>
                 )}
                 <ul className="rounded-xl surface-card divide-y divide-border">
@@ -801,7 +812,7 @@ function WorldCard({
             </span>
             {c.caves_enabled ? t('dashboard.worldsForestCaves') : t('dashboard.worldsForestOnly')}
           </p>
-          <Readiness cluster={c} health={health} />
+          {health !== 'crashed' && <Readiness cluster={c} health={health} />}
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5 pt-0.5">
           {/* A partial crash is serious but not total: say so with amber, not the red of a dead world. */}
@@ -826,7 +837,11 @@ function WorldCard({
         <div className="mx-5 mt-4 space-y-2.5 rounded-lg bg-amber-500/[0.08] px-3.5 py-3">
           <p className="flex items-center gap-1.5 text-[13px] font-semibold text-foreground">
             <CircleAlert className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden="true" />
-            {t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
+            {isAutoRecovering(c)
+              ? t('dashboard.autoRecovering')
+              : c.master_status.state === 'running'
+                ? t('dashboard.readyCavesCrashed')
+                : t('dashboard.readyForestCrashed')}
           </p>
           <CrashDiagnosis cluster={c} />
           <CrashActions
@@ -835,6 +850,7 @@ function WorldCard({
             blockReason={null}
             recoverLabel={t('dashboard.restartShard', { shard: crashedShardNames(c, t).join('、') })}
             onRecover={onStartCrashedShards}
+            primary={false}
           />
         </div>
       )}
@@ -848,7 +864,13 @@ function WorldCard({
             {running && <PlayerList players={players} max={c.max_players} isEn={isEn} />}
           </div>
           {running && (
-            <JoinInfo cluster={c} connectHost={connectHost} hostIsGuess={hostIsGuess} isAdmin={isAdmin} />
+            <JoinInfo
+              cluster={c}
+              connectHost={connectHost}
+              hostIsGuess={hostIsGuess}
+              isAdmin={isAdmin}
+              quiet={health === 'crashed'}
+            />
           )}
         </div>
       )}
@@ -972,15 +994,14 @@ function CrashDiagnosis({ cluster: c }: { cluster: ClusterSummary }) {
     staleTime: 5 * 60 * 1000,
   })
   const restarts = totalRestarts(c)
-  const pending =
-    (c.master_status.state === 'crashed' && c.master_status.auto_restart_pending) ||
-    (c.caves_enabled && c.caves_status?.state === 'crashed' && c.caves_status.auto_restart_pending)
+  const pending = isAutoRecovering(c)
   const when = formatWhen(lastCrashAt(c), i18n.language)
-  const modName =
+  const libraryName =
     diagnosis?.kind === 'mod'
-      ? (libraryData?.mods.find((m) => m.workshop_id === diagnosis.modId || m.mod_id === `workshop-${diagnosis.modId}`)?.name ??
-        `workshop-${diagnosis.modId}`)
-      : ''
+      ? libraryData?.mods.find((m) => m.workshop_id === diagnosis.modId || m.mod_id === `workshop-${diagnosis.modId}`)?.name
+      : undefined
+  // A placeholder name tells the owner nothing; show the workshop ID with a link instead.
+  const modKnown = Boolean(libraryName && !PLACEHOLDER_MOD_NAME.test(libraryName))
 
   const status = [
     when ? t('dashboard.crashedAt', { time: when }) : '',
@@ -1002,9 +1023,24 @@ function CrashDiagnosis({ cluster: c }: { cluster: ClusterSummary }) {
         </p>
       )}
       <p className="text-[13px] text-foreground text-pretty">
-        {diagnosis?.kind === 'mod'
-          ? t('dashboard.diagnoseMod', { name: modName })
-          : diagnosis?.kind === 'oom'
+        {diagnosis?.kind === 'mod' ? (
+          modKnown ? (
+            t('dashboard.diagnoseMod', { name: libraryName })
+          ) : (
+            <>
+              {t('dashboard.diagnoseModUnnamedPrefix')}
+              <a
+                href={`https://steamcommunity.com/sharedfiles/filedetails/?id=${diagnosis.modId}`}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium underline underline-offset-2 hover:opacity-80"
+              >
+                {t('dashboard.workshopModId', { id: diagnosis.modId })}
+              </a>
+              {t('dashboard.diagnoseModUnnamedSuffix')}
+            </>
+          )
+        ) : diagnosis?.kind === 'oom'
             ? t('dashboard.diagnoseOom')
             : t('dashboard.crashedHint')}
       </p>
@@ -1030,30 +1066,42 @@ function CrashActions({
   blockReason,
   recoverLabel,
   onRecover,
+  primary,
 }: {
   cluster: ClusterSummary
   busy: boolean
   blockReason: string | null
   recoverLabel: string
   onRecover: () => void
+  /** Only the page-level crash row gets a filled button; inside a card everything stays outlined. */
+  primary: boolean
 }) {
   const { t } = useTranslation()
   const name = clusterName(c)
   const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
   const diagnosis = diagnoseCrash(crashErrors(c))
-  const pending =
-    (c.master_status.state === 'crashed' && c.master_status.auto_restart_pending) ||
-    (c.caves_enabled && c.caves_status?.state === 'crashed' && c.caves_status.auto_restart_pending)
+  const pending = isAutoRecovering(c)
   const base = `/clusters/${encodeURIComponent(c.cluster_id)}`
   const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
-  const fixHref = diagnosis?.kind === 'mod' && canOperate ? `${base}/mods` : null
+  const crashedShard = c.master_status.state === 'crashed' ? 'master' : 'caves'
+  // Deep link straight to the offending mod on the right shard's Mods page.
+  const fixHref =
+    diagnosis?.kind === 'mod' && canOperate
+      ? `${base}/mods?shard=${crashedShard}&mod=${encodeURIComponent(`workshop-${diagnosis.modId}`)}`
+      : null
+  // With a known cause, restarting unchanged is a fallback, and the label says so.
+  const label = diagnosis ? t('dashboard.restartAnyway') : recoverLabel
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
       {!canOperate && <span className="text-[13px] text-muted-foreground">{t('dashboard.needOperator')}</span>}
       {canOperate && blockReason && <span className="text-[13px] text-muted-foreground">{blockReason}</span>}
       {fixHref && (
-        <Link to={fixHref} aria-label={forWorld(t('dashboard.fixMod'))} className={buttonVariants({ size: 'sm' })}>
+        <Link
+          to={fixHref}
+          aria-label={forWorld(t('dashboard.fixMod'))}
+          className={buttonVariants({ size: 'sm', variant: primary ? 'default' : 'outline' })}
+        >
           {t('dashboard.fixMod')}
           <ArrowRight className="h-3.5 w-3.5" />
         </Link>
@@ -1061,7 +1109,7 @@ function CrashActions({
       <Link
         to={`${base}/console`}
         aria-label={forWorld(t('dashboard.viewLogs'))}
-        className={buttonVariants({ size: 'sm', variant: fixHref ? 'outline' : 'default' })}
+        className={buttonVariants({ size: 'sm', variant: primary && !fixHref ? 'default' : 'outline' })}
       >
         <Terminal className="h-3.5 w-3.5" />
         {t('dashboard.viewLogs')}
@@ -1073,10 +1121,10 @@ function CrashActions({
           variant="outline"
           disabled={busy || !!blockReason}
           onClick={onRecover}
-          aria-label={forWorld(recoverLabel)}
+          aria-label={forWorld(label)}
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
-          {recoverLabel}
+          {label}
         </Button>
       )}
     </div>
@@ -1098,27 +1146,43 @@ function CrashedWorldRow({
   const { t } = useTranslation()
   const name = clusterName(c)
   const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
+  // While the backend is still auto-restarting, this is a recovery in progress, not an emergency.
+  const recovering = isAutoRecovering(c)
 
   return (
-    <li className="flex flex-wrap items-start gap-x-4 gap-y-3 rounded-xl border border-red-500/40 bg-red-500/[0.07] px-4 py-3.5 sm:px-5">
-      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
-      <div className="min-w-0 flex-1 basis-64 space-y-1">
-        <p className="text-[14px] font-semibold text-foreground">
-          <Link to={overviewHref} className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm">
-            {name}
-          </Link>
-          <span className="font-normal text-muted-foreground"> · </span>
-          {t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
-        </p>
-        <CrashDiagnosis cluster={c} />
-      </div>
-      <div className="ml-auto">
+    <li
+      className={cn(
+        'flex items-start gap-4 rounded-xl border px-4 py-3.5 sm:px-5',
+        recovering ? 'border-amber-500/40 bg-amber-500/[0.07]' : 'border-red-500/40 bg-red-500/[0.07]',
+      )}
+    >
+      <CircleAlert
+        className={cn(
+          'mt-0.5 h-5 w-5 shrink-0',
+          recovering ? 'text-amber-700 dark:text-amber-400' : 'text-red-700 dark:text-red-400',
+        )}
+        aria-hidden="true"
+      />
+      <div className="min-w-0 flex-1 space-y-2.5">
+        <div className="space-y-1">
+          <p className="text-[14px] font-semibold text-foreground">
+            <Link to={overviewHref} className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm">
+              {name}
+            </Link>
+            <span className="font-normal text-muted-foreground"> · </span>
+            {recovering
+              ? t('dashboard.autoRecovering')
+              : t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
+          </p>
+          <CrashDiagnosis cluster={c} />
+        </div>
         <CrashActions
           cluster={c}
           busy={busy}
           blockReason={startBlockReason}
           recoverLabel={t('dashboard.recoverWorld')}
           onRecover={onRecover}
+          primary
         />
       </div>
     </li>
@@ -1320,11 +1384,14 @@ function JoinInfo({
   connectHost,
   hostIsGuess,
   isAdmin,
+  quiet = false,
 }: {
   cluster: ClusterSummary
   connectHost: string
   hostIsGuess: boolean
   isAdmin: boolean
+  /** Outline the copy button when something more urgent on the card needs the attention. */
+  quiet?: boolean
 }) {
   const { t } = useTranslation()
   const [revealed, setRevealed] = useState(false)
@@ -1393,6 +1460,7 @@ function JoinInfo({
         <div className="mt-2.5">
           <Button
             size="sm"
+            variant={quiet ? 'outline' : 'default'}
             className="w-full"
             onClick={() => void copyConnect()}
             aria-label={t('dashboard.ariaFor', { action: t('dashboard.copyDirectConnect'), name: clusterName(c) })}

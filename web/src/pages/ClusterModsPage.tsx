@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -85,9 +85,12 @@ export function ClusterModsPage() {
   const { user } = useAuth()
   const qc = useQueryClient()
 
+  // ?mod=workshop-123&shard=caves arrives from the dashboard's crash notice: open that shard and point at the mod.
+  const [searchParams] = useSearchParams()
+  const focusModId = searchParams.get('mod')
   const [tab, setTab] = useState<ModsTab>('configured')
   const [pendingTab, setPendingTab] = useState<ModsTab | null>(null)
-  const [shard, setShard] = useState<'master' | 'caves'>('master')
+  const [shard, setShard] = useState<'master' | 'caves'>(searchParams.get('shard') === 'caves' ? 'caves' : 'master')
   const [pendingShard, setPendingShard] = useState<'master' | 'caves' | null>(null)
   const [quickInput, setQuickInput] = useState('')
   const [isCollection, setIsCollection] = useState(false)
@@ -157,6 +160,13 @@ export function ClusterModsPage() {
 
   const mods = modsData?.mods ?? []
   const modSync = modsData?.mod_sync_enabled ?? true
+  const focusMod = focusModId ? mods.find((m) => m.mod_id === focusModId) : undefined
+
+  useEffect(() => {
+    if (!focusMod) return
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    document.getElementById(`mod-card-${focusMod.mod_id}`)?.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+  }, [focusMod])
   const installedIds = new Set(mods.map((m) => m.mod_id))
   const rawDirty = rawLua !== initialRawLua
 
@@ -487,6 +497,12 @@ export function ClusterModsPage() {
             </Card>
           )}
 
+          {focusModId && !isLoading && !focusMod && (
+            <p className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[13px] text-amber-800 dark:text-amber-300">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {t('mods.crashSuspectMissing', { id: focusModId })}
+            </p>
+          )}
           {isLoading ? (
             <PageCardsSkeleton count={2} />
           ) : mods.length === 0 ? (
@@ -504,8 +520,22 @@ export function ClusterModsPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {mods.map((m) => (
-                <Card key={m.mod_id} interactive={m.enabled} className={cn(!m.enabled && 'border-dashed bg-muted/40')}>
+                <Card
+                  key={m.mod_id}
+                  id={`mod-card-${m.mod_id}`}
+                  interactive={m.enabled}
+                  className={cn(
+                    !m.enabled && 'border-dashed bg-muted/40',
+                    focusMod?.mod_id === m.mod_id && 'border-red-500/60 ring-2 ring-red-500/25',
+                  )}
+                >
                   <CardContent className="p-4 sm:p-5 space-y-3">
+                    {focusMod?.mod_id === m.mod_id && (
+                      <p className="flex items-start gap-1.5 rounded-md bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-800 dark:text-red-300">
+                        <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        <span>{m.enabled ? t('mods.crashSuspect') : t('mods.crashSuspectDisabled')}</span>
+                      </p>
+                    )}
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-start gap-3 min-w-0">
                         <ModThumbnail src={m.preview_url} alt={m.name} />
