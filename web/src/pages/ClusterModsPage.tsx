@@ -161,6 +161,19 @@ export function ClusterModsPage() {
   const mods = modsData?.mods ?? []
   const modSync = modsData?.mod_sync_enabled ?? true
   const focusMod = focusModId ? mods.find((m) => m.mod_id === focusModId) : undefined
+  const focusShard = searchParams.get('shard') === 'caves' ? 'caves' : 'master'
+
+  // Once the suspect mod is off, restart right here instead of sending the owner back to the dashboard.
+  // If the other shard is still up, only the crashed one is started so nobody gets kicked.
+  const recoverMut = useMutation({
+    mutationFn: () => api.startCluster(id, isClusterRunning ? focusShard : undefined),
+    onSuccess: () => {
+      toast.success(t('mods.recoverStarted', { name: clusterData?.cluster.meta.display_name || id }))
+      void qc.invalidateQueries({ queryKey: ['clusters'] })
+      void qc.invalidateQueries({ queryKey: ['cluster', id] })
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
 
   useEffect(() => {
     if (!focusMod) return
@@ -531,10 +544,25 @@ export function ClusterModsPage() {
                 >
                   <CardContent className="p-4 sm:p-5 space-y-3">
                     {focusMod?.mod_id === m.mod_id && (
-                      <p className="flex items-start gap-1.5 rounded-md bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-800 dark:text-red-300">
-                        <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                        <span>{m.enabled ? t('mods.crashSuspect') : t('mods.crashSuspectDisabled')}</span>
-                      </p>
+                      <div className="space-y-2 rounded-md bg-red-500/[0.08] px-2.5 py-2 text-xs text-red-800 dark:text-red-300">
+                        <p className="flex items-start gap-1.5">
+                          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          <span>{m.enabled ? t('mods.crashSuspect') : t('mods.crashSuspectDisabled')}</span>
+                        </p>
+                        {!m.enabled && canOperate && (
+                          <div className="flex flex-wrap items-center gap-2 pl-5">
+                            <Button size="sm" disabled={recoverMut.isPending} onClick={() => recoverMut.mutate()}>
+                              <RefreshCw className={cn('h-3.5 w-3.5', recoverMut.isPending && 'animate-spin')} />
+                              {isClusterRunning
+                                ? t('mods.recoverShard', { shard: t(focusShard === 'caves' ? 'common.cavesShort' : 'common.masterShort') })
+                                : t('mods.recoverWorld')}
+                            </Button>
+                            <Link to="/" className="text-xs text-foreground underline underline-offset-2 hover:opacity-80">
+                              {t('mods.backToDashboard')}
+                            </Link>
+                          </div>
+                        )}
+                      </div>
                     )}
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-start gap-3 min-w-0">

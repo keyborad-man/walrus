@@ -13,6 +13,7 @@ import {
   CircleAlert,
   Copy,
   Download,
+  ExternalLink,
   Eye,
   EyeOff,
   Flame,
@@ -400,6 +401,10 @@ export function DashboardPage() {
     <div className="space-y-6">
       <PageHeader
         title={t('dashboard.title')}
+        // Below lg the top bar already shows the page title; keep the h1 for screen readers only.
+        titleClassName="max-lg:sr-only"
+        // On phones the create/import actions move to the end of the page.
+        actionsClassName="max-sm:hidden"
         subtitle={subtitle}
         actions={
           showHeaderCreate ? (
@@ -629,6 +634,20 @@ export function DashboardPage() {
 
       <HostStrip metrics={metrics} steamStatus={steamStatus} isAdmin={isAdmin} />
 
+      {showHeaderCreate && (
+        // On phones, creating and importing are rare; they wait at the end instead of above the worlds.
+        <div className="flex flex-wrap gap-2 sm:hidden">
+          <Button variant="outline" onClick={() => setImportOpen(true)}>
+            <Upload className="h-3.5 w-3.5" />
+            {t('importCluster.btn')}
+          </Button>
+          <Button variant="outline" onClick={() => navigate('/clusters/new')}>
+            <Plus className="h-3.5 w-3.5" />
+            {t('dashboard.createCluster')}
+          </Button>
+        </div>
+      )}
+
       <ImportClusterDialog
         open={importOpen}
         onClose={() => setImportOpen(false)}
@@ -849,6 +868,7 @@ function WorldCard({
             busy={busy}
             blockReason={null}
             recoverLabel={t('dashboard.restartShard', { shard: crashedShardNames(c, t).join('、') })}
+            recoverAnywayLabel={t('dashboard.restartShardAnyway', { shard: crashedShardNames(c, t).join('、') })}
             onRecover={onStartCrashedShards}
             primary={false}
           />
@@ -869,7 +889,6 @@ function WorldCard({
               connectHost={connectHost}
               hostIsGuess={hostIsGuess}
               isAdmin={isAdmin}
-              quiet={health === 'crashed'}
             />
           )}
         </div>
@@ -921,9 +940,16 @@ function WorldCard({
               <Square className="h-3 w-3" />
               {t('dashboard.stopAll')}
             </Button>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={onRestart} aria-label={forWorld(t('dashboard.restartAll'))}>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={onRestart}
+              aria-label={forWorld(health === 'crashed' ? t('dashboard.restartWholeWorld') : t('dashboard.restartAll'))}
+            >
               <RotateCw className={cn('h-3.5 w-3.5', restarting && 'animate-spin')} />
-              {t('dashboard.restartAll')}
+              {/* Next to "restart caves only", the full restart must say it takes everyone out. */}
+              {health === 'crashed' ? t('dashboard.restartWholeWorld') : t('dashboard.restartAll')}
             </Button>
           </>
         )}
@@ -980,28 +1006,52 @@ function Readiness({ cluster: c, health }: { cluster: ClusterSummary; health: Co
 }
 
 /**
+ * The mod a crash points at, its readable name, and whether the owner has already turned it off.
+ * Shares the Mods page's query key, so coming back from that page shows the change immediately.
+ */
+function useSuspectMod(c: ClusterSummary) {
+  const { i18n } = useTranslation()
+  const diagnosis = diagnoseCrash(crashErrors(c))
+  const modId = diagnosis?.kind === 'mod' ? `workshop-${diagnosis.modId}` : null
+  const shard: 'master' | 'caves' = c.master_status.state === 'crashed' ? 'master' : 'caves'
+  const { data: libraryData } = useQuery({
+    queryKey: ['mod-library'],
+    queryFn: api.listModLibrary,
+    enabled: !!modId,
+    staleTime: 5 * 60 * 1000,
+  })
+  const { data: modsData } = useQuery({
+    queryKey: ['cluster-mods', c.cluster_id, shard, i18n.language],
+    queryFn: () => api.getClusterMods(c.cluster_id, shard, i18n.language),
+    enabled: !!modId,
+  })
+  const libraryName =
+    diagnosis?.kind === 'mod'
+      ? libraryData?.mods.find((m) => m.workshop_id === diagnosis.modId || m.mod_id === modId)?.name
+      : undefined
+  const installed = modId ? modsData?.mods.find((m) => m.mod_id === modId) : undefined
+  return {
+    diagnosis,
+    modId,
+    shard,
+    libraryName,
+    // A placeholder name tells the owner nothing; show the workshop ID with a link instead.
+    modKnown: Boolean(libraryName && !PLACEHOLDER_MOD_NAME.test(libraryName)),
+    disabled: Boolean(installed && !installed.enabled),
+  }
+}
+
+/**
  * What happened, when, and what to do about it, in plain words. The raw trace stays one
  * click away for whoever can read it, so the summary line never gets truncated mid-path.
  */
 function CrashDiagnosis({ cluster: c }: { cluster: ClusterSummary }) {
   const { t, i18n } = useTranslation()
   const errors = crashErrors(c)
-  const diagnosis = diagnoseCrash(errors)
-  const { data: libraryData } = useQuery({
-    queryKey: ['mod-library'],
-    queryFn: api.listModLibrary,
-    enabled: diagnosis?.kind === 'mod',
-    staleTime: 5 * 60 * 1000,
-  })
+  const { diagnosis, libraryName, modKnown, disabled } = useSuspectMod(c)
   const restarts = totalRestarts(c)
   const pending = isAutoRecovering(c)
   const when = formatWhen(lastCrashAt(c), i18n.language)
-  const libraryName =
-    diagnosis?.kind === 'mod'
-      ? libraryData?.mods.find((m) => m.workshop_id === diagnosis.modId || m.mod_id === `workshop-${diagnosis.modId}`)?.name
-      : undefined
-  // A placeholder name tells the owner nothing; show the workshop ID with a link instead.
-  const modKnown = Boolean(libraryName && !PLACEHOLDER_MOD_NAME.test(libraryName))
 
   const status = [
     when ? t('dashboard.crashedAt', { time: when }) : '',
@@ -1023,7 +1073,11 @@ function CrashDiagnosis({ cluster: c }: { cluster: ClusterSummary }) {
         </p>
       )}
       <p className="text-[13px] text-foreground text-pretty">
-        {diagnosis?.kind === 'mod' ? (
+        {diagnosis?.kind === 'mod' && disabled ? (
+          t('dashboard.diagnoseModDisabled', {
+            name: modKnown ? libraryName : t('dashboard.workshopModId', { id: diagnosis.modId }),
+          })
+        ) : diagnosis?.kind === 'mod' ? (
           modKnown ? (
             t('dashboard.diagnoseMod', { name: libraryName })
           ) : (
@@ -1036,6 +1090,7 @@ function CrashDiagnosis({ cluster: c }: { cluster: ClusterSummary }) {
                 className="font-medium underline underline-offset-2 hover:opacity-80"
               >
                 {t('dashboard.workshopModId', { id: diagnosis.modId })}
+                <ExternalLink className="ml-0.5 inline h-3 w-3 align-[-1px]" aria-label={t('dashboard.opensSteam')} />
               </a>
               {t('dashboard.diagnoseModUnnamedSuffix')}
             </>
@@ -1065,6 +1120,7 @@ function CrashActions({
   busy,
   blockReason,
   recoverLabel,
+  recoverAnywayLabel,
   onRecover,
   primary,
 }: {
@@ -1072,6 +1128,8 @@ function CrashActions({
   busy: boolean
   blockReason: string | null
   recoverLabel: string
+  /** Used once a cause is known and still in place: restarting unchanged is then a fallback. */
+  recoverAnywayLabel: string
   onRecover: () => void
   /** Only the page-level crash row gets a filled button; inside a card everything stays outlined. */
   primary: boolean
@@ -1079,18 +1137,17 @@ function CrashActions({
   const { t } = useTranslation()
   const name = clusterName(c)
   const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
-  const diagnosis = diagnoseCrash(crashErrors(c))
+  const { diagnosis, modId, shard, disabled } = useSuspectMod(c)
   const pending = isAutoRecovering(c)
   const base = `/clusters/${encodeURIComponent(c.cluster_id)}`
   const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
-  const crashedShard = c.master_status.state === 'crashed' ? 'master' : 'caves'
-  // Deep link straight to the offending mod on the right shard's Mods page.
+  // Deep link straight to the offending mod on the right shard's Mods page, until it has been turned off.
   const fixHref =
-    diagnosis?.kind === 'mod' && canOperate
-      ? `${base}/mods?shard=${crashedShard}&mod=${encodeURIComponent(`workshop-${diagnosis.modId}`)}`
-      : null
-  // With a known cause, restarting unchanged is a fallback, and the label says so.
-  const label = diagnosis ? t('dashboard.restartAnyway') : recoverLabel
+    modId && !disabled && canOperate ? `${base}/mods?shard=${shard}&mod=${encodeURIComponent(modId)}` : null
+  // Once the cause is dealt with (mod off), restarting is the next step, not a gamble.
+  const causeOpen = Boolean(diagnosis) && !disabled
+  const label = causeOpen ? recoverAnywayLabel : recoverLabel
+  const restartIsPrimary = primary && disabled
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
@@ -1106,15 +1163,35 @@ function CrashActions({
           <ArrowRight className="h-3.5 w-3.5" />
         </Link>
       )}
+      {canOperate && !pending && disabled && (
+        <Button
+          size="sm"
+          variant={restartIsPrimary ? 'default' : 'outline'}
+          disabled={busy || !!blockReason}
+          onClick={onRecover}
+          aria-label={forWorld(label)}
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+          {label}
+        </Button>
+      )}
+      {diagnosis?.kind === 'oom' && canOperate && (
+        <Link to={`${base}/mods`} aria-label={forWorld(t('dashboard.viewMods'))} className={buttonVariants({ size: 'sm', variant: 'outline' })}>
+          {t('dashboard.viewMods')}
+        </Link>
+      )}
       <Link
         to={`${base}/console`}
         aria-label={forWorld(t('dashboard.viewLogs'))}
-        className={buttonVariants({ size: 'sm', variant: primary && !fixHref ? 'default' : 'outline' })}
+        className={buttonVariants({
+          size: 'sm',
+          variant: primary && !fixHref && !restartIsPrimary ? 'default' : 'outline',
+        })}
       >
         <Terminal className="h-3.5 w-3.5" />
         {t('dashboard.viewLogs')}
       </Link>
-      {canOperate && !pending && (
+      {canOperate && !pending && !disabled && (
         // Restarting is offered, but never as the loudest choice: it already failed at least once.
         <Button
           size="sm"
@@ -1181,6 +1258,7 @@ function CrashedWorldRow({
           busy={busy}
           blockReason={startBlockReason}
           recoverLabel={t('dashboard.recoverWorld')}
+          recoverAnywayLabel={t('dashboard.restartAnyway')}
           onRecover={onRecover}
           primary
         />
@@ -1384,14 +1462,11 @@ function JoinInfo({
   connectHost,
   hostIsGuess,
   isAdmin,
-  quiet = false,
 }: {
   cluster: ClusterSummary
   connectHost: string
   hostIsGuess: boolean
   isAdmin: boolean
-  /** Outline the copy button when something more urgent on the card needs the attention. */
-  quiet?: boolean
 }) {
   const { t } = useTranslation()
   const [revealed, setRevealed] = useState(false)
@@ -1460,7 +1535,7 @@ function JoinInfo({
         <div className="mt-2.5">
           <Button
             size="sm"
-            variant={quiet ? 'outline' : 'default'}
+            variant="outline"
             className="w-full"
             onClick={() => void copyConnect()}
             aria-label={t('dashboard.ariaFor', { action: t('dashboard.copyDirectConnect'), name: clusterName(c) })}

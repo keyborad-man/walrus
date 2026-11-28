@@ -9,13 +9,17 @@ interface PageHeaderProps {
   badge?: React.ReactNode
   actions?: React.ReactNode
   className?: string
+  /** Extra classes for the title row, e.g. to hide it visually where the app bar already shows the title. */
+  titleClassName?: string
+  /** Extra classes for the actions container. */
+  actionsClassName?: string
 }
 
-export function PageHeader({ title, subtitle, badge, actions, className }: PageHeaderProps) {
+export function PageHeader({ title, subtitle, badge, actions, className, titleClassName, actionsClassName }: PageHeaderProps) {
   return (
     <div className={cn('flex flex-col md:flex-row md:items-end md:justify-between gap-3.5', className)}>
       <div className="space-y-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className={cn('flex items-center gap-2 flex-wrap', titleClassName)}>
           <h1 className="text-[20px] sm:text-[22px] font-semibold tracking-[-0.02em] leading-tight text-foreground">
             {title}
           </h1>
@@ -25,7 +29,7 @@ export function PageHeader({ title, subtitle, badge, actions, className }: PageH
           <p className="text-[13px] text-muted-foreground leading-relaxed text-pretty max-w-2xl">{subtitle}</p>
         )}
       </div>
-      {actions && <div className="flex flex-wrap items-center gap-2 shrink-0">{actions}</div>}
+      {actions && <div className={cn('flex flex-wrap items-center gap-2 shrink-0', actionsClassName)}>{actions}</div>}
     </div>
   )
 }
