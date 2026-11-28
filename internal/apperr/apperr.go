@@ -110,6 +110,7 @@ const (
 	CodeSteamAPIKeyRequired       = "STEAM_API_KEY_REQUIRED"
 	CodeWorkshopSearchFailed      = "WORKSHOP_SEARCH_FAILED"
 	CodeSteamAPIKeyRejected       = "STEAM_API_KEY_REJECTED"
+	CodeInvalidModID              = "INVALID_MOD_ID"
 
 	// SteamCMD
 	CodeKleiBuildsFetchFailed   = "KLEI_BUILDS_FETCH_FAILED"

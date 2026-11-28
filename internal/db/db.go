@@ -170,6 +170,15 @@ func (s *Store) migrate() error {
 			installed_time_updated INTEGER NOT NULL DEFAULT 0,
 			last_synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS mod_favorites (
+			mod_id TEXT PRIMARY KEY,
+			workshop_id TEXT NOT NULL DEFAULT '',
+			is_local INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			preview_url TEXT NOT NULL DEFAULT '',
+			config_json TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 
 	for _, stmt := range stmts {
@@ -830,6 +839,83 @@ func (s *Store) ListModCache() ([]ModCache, error) {
 
 func (s *Store) DeleteModCache(modID string) error {
 	_, err := s.db.Exec(`DELETE FROM mod_cache WHERE mod_id = ?`, modID)
+	return err
+}
+
+// --- Mod Favorites ---
+
+const modFavoriteColumns = `mod_id, workshop_id, is_local, name, preview_url, config_json, created_at`
+
+func scanModFavorite(scan func(dest ...any) error) (*ModFavorite, error) {
+	f := &ModFavorite{}
+	var isLocal int
+	var configJSON string
+	if err := scan(&f.ModID, &f.WorkshopID, &isLocal, &f.Name, &f.PreviewURL, &configJSON, &f.CreatedAt); err != nil {
+		return nil, err
+	}
+	f.IsLocal = isLocal != 0
+	// An empty config_json means the favorite was saved without settings; the mod's defaults apply.
+	if configJSON != "" {
+		if err := json.Unmarshal([]byte(configJSON), &f.ConfigurationOptions); err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
+}
+
+func (s *Store) ListModFavorites() ([]ModFavorite, error) {
+	rows, err := s.db.Query(`SELECT ` + modFavoriteColumns + ` FROM mod_favorites ORDER BY created_at DESC, mod_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	list := []ModFavorite{}
+	for rows.Next() {
+		f, err := scanModFavorite(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, *f)
+	}
+	return list, rows.Err()
+}
+
+func (s *Store) GetModFavorite(modID string) (*ModFavorite, error) {
+	f, err := scanModFavorite(s.db.QueryRow(`SELECT `+modFavoriteColumns+` FROM mod_favorites WHERE mod_id = ?`, modID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return f, err
+}
+
+// UpsertModFavorite saves a favorite; favoriting a mod again replaces its stored info and settings.
+func (s *Store) UpsertModFavorite(f *ModFavorite) error {
+	configJSON := ""
+	if f.ConfigurationOptions != nil {
+		b, err := json.Marshal(f.ConfigurationOptions)
+		if err != nil {
+			return err
+		}
+		configJSON = string(b)
+	}
+	if f.CreatedAt.IsZero() {
+		f.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO mod_favorites(`+modFavoriteColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(mod_id) DO UPDATE SET
+		   workshop_id = excluded.workshop_id,
+		   is_local = excluded.is_local,
+		   name = excluded.name,
+		   preview_url = excluded.preview_url,
+		   config_json = excluded.config_json`,
+		f.ModID, f.WorkshopID, boolInt(f.IsLocal), f.Name, f.PreviewURL, configJSON, f.CreatedAt,
+	)
+	return err
+}
+
+func (s *Store) DeleteModFavorite(modID string) error {
+	_, err := s.db.Exec(`DELETE FROM mod_favorites WHERE mod_id = ?`, modID)
 	return err
 }
 

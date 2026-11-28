@@ -121,6 +121,9 @@ func (s *Server) Engine() *gin.Engine {
 			authed.GET("/mods/workshop/search", s.handleWorkshopSearch)
 			authed.GET("/mods/library", s.handleListModLibrary)
 			authed.POST("/mods/:modId/download", s.authSvc.RequireAnyOperator(), s.handleRedownloadMod)
+			authed.GET("/mods/favorites", s.handleListModFavorites)
+			authed.PUT("/mods/favorites/:modId", s.authSvc.RequireAnyOperator(), s.handleSaveModFavorite)
+			authed.DELETE("/mods/favorites/:modId", s.authSvc.RequireAnyOperator(), s.handleDeleteModFavorite)
 
 			// GM Command Snippets
 			authed.GET("/snippets", s.handleListSnippets)
@@ -178,6 +181,7 @@ func (s *Server) Engine() *gin.Engine {
 				// Mods per cluster
 				clusterOp.POST("/mods/workshop", s.handleAddWorkshopMod)
 				clusterOp.POST("/mods/local", s.handleAddLocalModToCluster)
+				clusterOp.POST("/mods/favorites", s.handleAddFavoriteModsToCluster)
 				clusterOp.PUT("/mods/raw", s.handleSaveRawModOverrides)
 				clusterOp.PUT("/mods/sync", s.handleSetModSync)
 				clusterOp.POST("/mods/updates", s.handleUpdateClusterMods)

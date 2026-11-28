@@ -748,3 +748,95 @@ func TestScheduleModUpdateAndUpdateRBAC(t *testing.T) {
 	}
 	_ = createdResp
 }
+
+func TestModFavoritesFlowAndRBAC(t *testing.T) {
+	h, cleanup := setupTestEngine(t)
+	defer cleanup()
+
+	rec := doJSON(t, h, http.MethodPost, "/api/v1/auth/setup", "", map[string]any{
+		"username": "admin",
+		"password": "password123",
+	})
+	var setupResp struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &setupResp)
+	adminTok := setupResp.Token
+
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/clusters", adminTok, map[string]any{
+		"cluster_id":    "fav_world",
+		"cluster_name":  "Fav World",
+		"game_mode":     "endless",
+		"caves_enabled": false,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create cluster failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/users", adminTok, map[string]any{
+		"username": "viewer1",
+		"password": "password123",
+		"role":     "viewer",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create viewer failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/auth/login", "", map[string]any{
+		"username": "viewer1",
+		"password": "password123",
+	})
+	var viewerLogin struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &viewerLogin)
+	viewerTok := viewerLogin.Token
+
+	// Viewers can read favorites but not change them.
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/mods/favorites/workshop-378160973", viewerTok, map[string]any{"name": "Global Positions"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for viewer saving a favorite, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/mods/favorites/workshop-abc", adminTok, map[string]any{})
+	if rec.Code != http.StatusBadRequest || !bytes.Contains(rec.Body.Bytes(), []byte(apperr.CodeInvalidModID)) {
+		t.Fatalf("expected 400 INVALID_MOD_ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPut, "/api/v1/mods/favorites/workshop-378160973", adminTok, map[string]any{
+		"name":                  "Global Positions",
+		"configuration_options": map[string]any{"SHOWPLAYERSOPTIONS": 2},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save favorite failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/mods/favorites", viewerTok, nil)
+	if rec.Code != http.StatusOK ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"mod_id":"workshop-378160973"`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"SHOWPLAYERSOPTIONS":2`)) {
+		t.Fatalf("expected viewer to list the favorite with its settings, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/clusters/fav_world/mods/favorites", viewerTok, map[string]any{
+		"mod_ids": []string{"workshop-378160973"},
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for viewer adding favorites to a cluster, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodPost, "/api/v1/clusters/fav_world/mods/favorites", adminTok, map[string]any{
+		"shard":   "master",
+		"mod_ids": []string{"workshop-378160973"},
+	})
+	if rec.Code != http.StatusCreated || !bytes.Contains(rec.Body.Bytes(), []byte(`"added":["workshop-378160973"]`)) {
+		t.Fatalf("add favorites failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/clusters/fav_world/mods?shard=master", adminTok, nil)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"SHOWPLAYERSOPTIONS":2`)) {
+		t.Fatalf("expected cluster mod to carry the favorite's settings, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, h, http.MethodDelete, "/api/v1/mods/favorites/workshop-378160973", adminTok, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete favorite failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/mods/favorites", adminTok, nil)
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"favorites":[]`)) {
+		t.Fatalf("expected empty favorites after delete, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

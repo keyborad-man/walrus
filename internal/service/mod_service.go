@@ -526,7 +526,12 @@ func (s *ModService) AddWorkshopInput(ctx context.Context, clusterID, shard, inp
 	if len(ids) == 0 {
 		return nil, apperr.New(apperr.CodeNoWorkshopIDs, "no workshop mod IDs found")
 	}
+	return s.addWorkshopIDs(ctx, clusterID, shard, ids, locale)
+}
 
+// addWorkshopIDs downloads the given Workshop items and enables them in the cluster with default
+// settings. Mods the cluster already lists keep their current entry.
+func (s *ModService) addWorkshopIDs(ctx context.Context, clusterID, shard string, ids []string, locale string) ([]string, error) {
 	// Fetch Steam metadata (best effort).
 	details, _ := s.workshop.GetPublishedFileDetails(ctx, ids)
 	detailMap := make(map[string]steam.WorkshopItem, len(details))
@@ -646,6 +651,124 @@ func (s *ModService) AddLocalModToCluster(clusterID, shard, modID, locale string
 		ConfigurationOptions: defaults,
 	}
 	return s.writeClusterOverrides(clusterID, shard, overrides)
+}
+
+var workshopModIDPattern = regexp.MustCompile(`^workshop-[0-9]+$`)
+
+// favoriteModRef checks a mod ID and reports whether it names a Workshop mod (with its Workshop ID)
+// or a local mod folder.
+func favoriteModRef(modID string) (workshopID string, isLocal bool, err error) {
+	if workshopModIDPattern.MatchString(modID) {
+		return strings.TrimPrefix(modID, "workshop-"), false, nil
+	}
+	if modID == "" || modID == "." || strings.HasPrefix(modID, "workshop-") ||
+		strings.ContainsAny(modID, `/\`) || strings.Contains(modID, "..") {
+		return "", false, apperr.Newf(apperr.CodeInvalidModID, map[string]any{"mod_id": modID}, "invalid mod id %q", modID)
+	}
+	return "", true, nil
+}
+
+// SaveFavorite adds a mod to the panel-wide favorites, or replaces the saved entry if it is already there.
+func (s *ModService) SaveFavorite(f *db.ModFavorite) (*db.ModFavorite, error) {
+	wid, isLocal, err := favoriteModRef(f.ModID)
+	if err != nil {
+		return nil, err
+	}
+	f.WorkshopID, f.IsLocal = wid, isLocal
+	if cache, err := s.store.GetModCache(f.ModID); err == nil {
+		if f.Name == "" {
+			f.Name = cache.Name
+		}
+		if f.PreviewURL == "" {
+			f.PreviewURL = cache.PreviewURL
+		}
+	}
+	if existing, err := s.store.GetModFavorite(f.ModID); err == nil {
+		f.CreatedAt = existing.CreatedAt
+	}
+	if err := s.store.UpsertModFavorite(f); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// AddFavoritesToCluster adds the chosen favorites to a cluster, applying each favorite's saved settings
+// over the mod's defaults. Mods the cluster already lists are skipped so settings tuned there survive.
+func (s *ModService) AddFavoritesToCluster(ctx context.Context, clusterID, shard string, modIDs []string, locale string) ([]string, error) {
+	if !s.fs.ClusterExists(clusterID) {
+		return nil, db.ErrNotFound
+	}
+	raw, err := s.fs.ReadModOverrides(clusterID, shard)
+	if err != nil {
+		return nil, err
+	}
+	overrides, err := lua.ParseModOverrides(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	var favs []*db.ModFavorite
+	var workshopIDs []string
+	seen := map[string]bool{}
+	for _, modID := range modIDs {
+		if seen[modID] {
+			continue
+		}
+		seen[modID] = true
+		if _, exists := overrides[modID]; exists {
+			continue
+		}
+		fav, err := s.store.GetModFavorite(modID)
+		if err != nil {
+			return nil, err
+		}
+		favs = append(favs, fav)
+		if !fav.IsLocal {
+			workshopIDs = append(workshopIDs, fav.WorkshopID)
+		}
+	}
+	if len(favs) == 0 {
+		return []string{}, nil
+	}
+
+	if len(workshopIDs) > 0 {
+		if _, err := s.addWorkshopIDs(ctx, clusterID, shard, workshopIDs, locale); err != nil {
+			return nil, err
+		}
+	}
+	for _, fav := range favs {
+		if fav.IsLocal {
+			if err := s.AddLocalModToCluster(clusterID, shard, fav.ModID, locale); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	raw, err = s.fs.ReadModOverrides(clusterID, shard)
+	if err != nil {
+		return nil, err
+	}
+	overrides, err = lua.ParseModOverrides(raw)
+	if err != nil {
+		return nil, err
+	}
+	added := make([]string, 0, len(favs))
+	for _, fav := range favs {
+		entry := overrides[fav.ModID]
+		if entry.ConfigurationOptions == nil {
+			entry.ConfigurationOptions = map[string]any{}
+		}
+		for k, v := range fav.ConfigurationOptions {
+			entry.ConfigurationOptions[k] = v
+		}
+		entry.Enabled = true
+		overrides[fav.ModID] = entry
+		added = append(added, fav.ModID)
+	}
+	if err := s.writeClusterOverrides(clusterID, shard, overrides); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
 
 func (s *ModService) SaveClusterMod(clusterID, shard, modID string, enabled bool, configOpts map[string]any) error {

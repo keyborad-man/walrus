@@ -409,6 +409,17 @@ export interface ModCache {
   last_synced_at: string
 }
 
+export interface ModFavorite {
+  mod_id: string
+  workshop_id: string
+  is_local: boolean
+  name: string
+  preview_url: string
+  // null when the favorite carries no settings of its own and the mod's defaults apply
+  configuration_options: Record<string, unknown> | null
+  created_at: string
+}
+
 export interface PlayerHistory {
   ku_id: string
   last_name: string

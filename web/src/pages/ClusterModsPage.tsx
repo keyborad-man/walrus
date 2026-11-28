@@ -17,6 +17,7 @@ import {
   Save,
   Search,
   Settings,
+  Star,
   Trash2,
   Trees,
   Upload,
@@ -40,7 +41,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { PageCardsSkeleton } from '@/components/ui/skeleton'
 import type { ClusterModItem, ModCache, ModConfigOption } from '@/types/api'
 
-type ModsTab = 'configured' | 'workshop' | 'local' | 'raw'
+type ModsTab = 'configured' | 'favorites' | 'workshop' | 'local' | 'raw'
 
 function formatCompactCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
@@ -76,6 +77,33 @@ function ModThumbnail({ src, alt }: { src?: string; alt: string }) {
       onError={() => setFailed(true)}
       className="h-12 w-12 rounded-lg object-cover border border-border bg-secondary/40 shrink-0"
     />
+  )
+}
+
+function FavoriteToggle({
+  active,
+  label,
+  disabled,
+  onClick,
+}: {
+  active: boolean
+  label: string
+  disabled?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Button
+      size="icon"
+      variant="ghost"
+      aria-pressed={active}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={active ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}
+    >
+      <Star className={cn('h-4 w-4', active && 'fill-current')} />
+    </Button>
   )
 }
 
@@ -159,6 +187,13 @@ export function ClusterModsPage() {
     queryFn: api.listModLibrary,
     enabled: tab === 'local',
   })
+
+  const { data: favoritesData } = useQuery({
+    queryKey: ['mod-favorites'],
+    queryFn: api.listModFavorites,
+  })
+  const favorites = favoritesData?.favorites ?? []
+  const favoriteIds = new Set(favorites.map((f) => f.mod_id))
 
   const { data: searchData, isFetching: searching, error: searchErr } = useQuery({
     queryKey: ['workshop-search', submittedQuery],
@@ -352,6 +387,41 @@ export function ClusterModsPage() {
     }
   }
 
+  const favoriteMut = useMutation({
+    // Resolves to true when the mod was removed from favorites, false when it was added.
+    mutationFn: async (vars: { modId: string; name: string; preview_url?: string; configuration_options?: Record<string, unknown> }) => {
+      if (favoriteIds.has(vars.modId)) {
+        await api.deleteModFavorite(vars.modId)
+        return true
+      }
+      await api.saveModFavorite(vars.modId, {
+        name: vars.name,
+        preview_url: vars.preview_url,
+        configuration_options: vars.configuration_options,
+      })
+      return false
+    },
+    onSuccess: (removed, vars) => {
+      const name = vars.name || vars.modId
+      if (removed) toast.success(t('mods.toastUnfavorited', { name }))
+      else if (vars.configuration_options) toast.success(t('mods.toastFavoritedWithConfig', { name }))
+      else toast.success(t('mods.toastFavorited', { name }))
+      void qc.invalidateQueries({ queryKey: ['mod-favorites'] })
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
+
+  const addFavoritesMut = useMutation({
+    mutationFn: (modIds: string[]) =>
+      api.addFavoriteModsToCluster(id, { shard: modSync ? 'master' : shard, mod_ids: modIds, locale: i18n.language }),
+    onSuccess: (res) => {
+      toast.success(t('mods.toastFavoritesAdded', { count: res.added.length }))
+      if (res.added.length > 0) setModsNeedRestart(true)
+      refreshMods()
+    },
+    onError: (err: Error) => toast.error(err.message),
+  })
+
   const uploadLocalMut = useMutation({
     mutationFn: (file: File) => api.uploadLocalMod(file, i18n.language),
     onSuccess: () => {
@@ -402,6 +472,7 @@ export function ClusterModsPage() {
   }
 
   const localMods = (libraryData?.mods ?? []).filter((m) => m.is_local)
+  const favoritesToAdd = favorites.filter((f) => !installedIds.has(f.mod_id)).map((f) => f.mod_id)
 
   const requestTabChange = (next: ModsTab) => {
     if (next === tab) return
@@ -486,6 +557,7 @@ export function ClusterModsPage() {
         onChange={requestTabChange}
         items={[
           { key: 'configured', label: `${t('mods.tabConfigured')} (${mods.length})`, icon: <Package className="h-3.5 w-3.5" /> },
+          { key: 'favorites', label: `${t('mods.tabFavorites')} (${favorites.length})`, icon: <Star className="h-3.5 w-3.5" /> },
           { key: 'workshop', label: t('mods.tabWorkshop'), icon: <Search className="h-3.5 w-3.5" /> },
           { key: 'local', label: t('mods.tabLocal'), icon: <FolderArchive className="h-3.5 w-3.5" /> },
           { key: 'raw', label: t('mods.tabRaw'), icon: <Code2 className="h-3.5 w-3.5" /> },
@@ -698,22 +770,114 @@ export function ClusterModsPage() {
                         )}
                       </div>
                       {canOperate && (
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          aria-label={`${t('mods.remove')} ${m.name}`}
-                          title={t('mods.remove')}
-                          className="text-red-700 hover:bg-red-600/12 dark:text-red-400 dark:hover:bg-red-500/12"
-                          onClick={() => setRemoveTarget(m)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <FavoriteToggle
+                            active={favoriteIds.has(m.mod_id)}
+                            label={favoriteIds.has(m.mod_id) ? t('mods.unfavorite') : t('mods.favoriteWithConfig')}
+                            disabled={favoriteMut.isPending}
+                            onClick={() =>
+                              favoriteMut.mutate({
+                                modId: m.mod_id,
+                                name: m.name,
+                                preview_url: m.preview_url,
+                                configuration_options: m.configuration_options ?? {},
+                              })
+                            }
+                          />
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            aria-label={`${t('mods.remove')} ${m.name}`}
+                            title={t('mods.remove')}
+                            className="text-red-700 hover:bg-red-600/12 dark:text-red-400 dark:hover:bg-red-500/12"
+                            onClick={() => setRemoveTarget(m)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
                       )}
                     </div>
                   </CardContent>
                 </Card>
               ))}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* Favorites Tab */}
+      {tab === 'favorites' && (
+        <div id="cluster-mods-panel-favorites" role="tabpanel" aria-labelledby="cluster-mods-tab-favorites" className="space-y-4">
+          {favorites.length === 0 ? (
+            <EmptyState
+              icon={<Star className="h-5 w-5" />}
+              title={t('mods.tabFavorites')}
+              description={t('mods.emptyFavorites')}
+            />
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-muted-foreground text-pretty max-w-2xl">{t('mods.favoritesHint')}</p>
+                {canOperate && (
+                  <Button
+                    size="sm"
+                    disabled={favoritesToAdd.length === 0 || addFavoritesMut.isPending}
+                    onClick={() => addFavoritesMut.mutate(favoritesToAdd)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {t('mods.addAllFavorites', { count: favoritesToAdd.length })}
+                  </Button>
+                )}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {favorites.map((f) => {
+                  const added = installedIds.has(f.mod_id)
+                  const savedCount = f.configuration_options ? Object.keys(f.configuration_options).length : 0
+                  return (
+                    <Card key={f.mod_id} className="flex flex-col">
+                      <CardContent className="p-4 sm:p-5 flex-1 flex flex-col justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                          <ModThumbnail src={f.preview_url} alt={f.name || f.mod_id} />
+                          <div className="min-w-0">
+                            <h2 className="font-semibold text-sm line-clamp-1">{f.name || f.mod_id}</h2>
+                            <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                              <Badge variant="secondary" className="font-mono">
+                                {f.mod_id}
+                              </Badge>
+                              {f.is_local && <Badge variant="info">{t('mods.localBadge')}</Badge>}
+                              <Badge variant="muted">
+                                {savedCount > 0
+                                  ? t('mods.favoriteConfigSaved', { count: savedCount })
+                                  : t('mods.favoriteConfigDefault')}
+                              </Badge>
+                            </div>
+                          </div>
+                        </div>
+                        {canOperate && (
+                          <div className="pt-2 border-t border-border flex items-center justify-end gap-1.5">
+                            <FavoriteToggle
+                              active
+                              label={t('mods.unfavorite')}
+                              disabled={favoriteMut.isPending}
+                              onClick={() => favoriteMut.mutate({ modId: f.mod_id, name: f.name })}
+                            />
+                            <Button
+                              size="sm"
+                              variant={added ? 'secondary' : 'default'}
+                              disabled={added || addFavoritesMut.isPending}
+                              onClick={() => addFavoritesMut.mutate([f.mod_id])}
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              {added ? t('mods.alreadyAdded') : t('mods.addToCluster')}
+                            </Button>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )
+                })}
+              </div>
+            </>
           )}
         </div>
       )}
@@ -813,7 +977,17 @@ export function ClusterModsPage() {
                           <p className="text-xs text-muted-foreground line-clamp-3">{item.description}</p>
                           {item.is_client_only && <Badge variant="warning">{t('mods.clientOnlyWarn')}</Badge>}
                         </div>
-                        <div className="pt-2 border-t border-border flex justify-end">
+                        <div className="pt-2 border-t border-border flex items-center justify-end gap-1.5">
+                          {canOperate && (
+                            <FavoriteToggle
+                              active={favoriteIds.has(item.mod_id)}
+                              label={favoriteIds.has(item.mod_id) ? t('mods.unfavorite') : t('mods.favorite')}
+                              disabled={favoriteMut.isPending}
+                              onClick={() =>
+                                favoriteMut.mutate({ modId: item.mod_id, name: item.title, preview_url: item.preview_url })
+                              }
+                            />
+                          )}
                           <Button
                             size="sm"
                             variant={added ? 'secondary' : 'default'}
@@ -888,6 +1062,14 @@ export function ClusterModsPage() {
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
+                          {canOperate && (
+                            <FavoriteToggle
+                              active={favoriteIds.has(m.mod_id)}
+                              label={favoriteIds.has(m.mod_id) ? t('mods.unfavorite') : t('mods.favorite')}
+                              disabled={favoriteMut.isPending}
+                              onClick={() => favoriteMut.mutate({ modId: m.mod_id, name: m.name })}
+                            />
+                          )}
                           <Button
                             size="sm"
                             variant={added ? 'secondary' : 'default'}

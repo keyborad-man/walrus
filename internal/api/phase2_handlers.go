@@ -11,6 +11,7 @@ import (
 
 	"walrus/internal/apperr"
 	"walrus/internal/auth"
+	"walrus/internal/db"
 )
 
 // --- SteamCMD & Version Management ---
@@ -321,6 +322,82 @@ func (s *Server) handleListModLibrary(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"mods": list})
+}
+
+func (s *Server) handleListModFavorites(c *gin.Context) {
+	list, err := s.store.ListModFavorites()
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"favorites": list})
+}
+
+type saveModFavoriteRequest struct {
+	Name                 string         `json:"name"`
+	PreviewURL           string         `json:"preview_url"`
+	ConfigurationOptions map[string]any `json:"configuration_options"`
+}
+
+func (s *Server) handleSaveModFavorite(c *gin.Context) {
+	var req saveModFavoriteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondBindError(c, err)
+		return
+	}
+	fav, err := s.modSvc.SaveFavorite(&db.ModFavorite{
+		ModID:                c.Param("modId"),
+		Name:                 strings.TrimSpace(req.Name),
+		PreviewURL:           strings.TrimSpace(req.PreviewURL),
+		ConfigurationOptions: req.ConfigurationOptions,
+	})
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	u := auth.CurrentUser(c)
+	s.store.AddAuditLog(u.Username, "mod.favorite.save", fav.ModID, "with_config="+strconv.FormatBool(fav.ConfigurationOptions != nil), c.ClientIP())
+	c.JSON(http.StatusOK, gin.H{"favorite": fav})
+}
+
+func (s *Server) handleDeleteModFavorite(c *gin.Context) {
+	modID := c.Param("modId")
+	if err := s.store.DeleteModFavorite(modID); err != nil {
+		respondError(c, http.StatusInternalServerError, err)
+		return
+	}
+	u := auth.CurrentUser(c)
+	s.store.AddAuditLog(u.Username, "mod.favorite.delete", modID, "", c.ClientIP())
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+type addFavoriteModsRequest struct {
+	Shard  string   `json:"shard"`
+	ModIDs []string `json:"mod_ids" binding:"required"`
+	Locale string   `json:"locale"`
+}
+
+func (s *Server) handleAddFavoriteModsToCluster(c *gin.Context) {
+	id := c.Param("id")
+	var req addFavoriteModsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondBindError(c, err)
+		return
+	}
+	shard := strings.ToLower(strings.TrimSpace(req.Shard))
+	if shard == "" {
+		shard = "master"
+	}
+	added, err := s.modSvc.AddFavoritesToCluster(c.Request.Context(), id, shard, req.ModIDs, req.Locale)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if len(added) > 0 {
+		u := auth.CurrentUser(c)
+		s.store.AddAuditLog(u.Username, "mod.add_favorites", id, strings.Join(added, ","), c.ClientIP())
+	}
+	c.JSON(http.StatusCreated, gin.H{"added": added})
 }
 
 func (s *Server) handleUploadLocalMod(c *gin.Context) {

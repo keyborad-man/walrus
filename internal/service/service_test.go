@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -986,5 +987,123 @@ func TestCreateClusterWithCustomWorldOverridesAndNetworkMode(t *testing.T) {
 		cavesView.Parsed.Overrides["world_size"] != "medium" ||
 		cavesView.Parsed.Overrides["acidrain_enabled"] != "none" {
 		t.Fatalf("unexpected caves overrides: %+v", cavesView.Parsed)
+	}
+}
+
+func TestAddFavoritesToClusterCarriesSavedConfig(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := db.Open(filepath.Join(tmp, "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	dstDir := filepath.Join(tmp, "dst-server")
+	localModsDir := filepath.Join(tmp, "local-mods")
+	fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+	driver := runtime.NewMockDriver(tmp, fs)
+	steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+	workshop := steam.NewWorkshopClient("mock")
+	modSvc := NewModService(dstDir, localModsDir, store, fs, steamMgr, workshop)
+	clusterSvc := NewClusterService(store, fs, driver)
+	if _, err := clusterSvc.CreateCluster(CreateClusterRequest{
+		ClusterID:    "fav_world",
+		ClusterName:  "Fav World",
+		GameMode:     "endless",
+		CavesEnabled: true,
+	}); err != nil {
+		t.Fatalf("create cluster: %v", err)
+	}
+
+	localSrc := filepath.Join(localModsDir, "local-custom")
+	if err := os.MkdirAll(localSrc, 0o755); err != nil {
+		t.Fatalf("mkdir local mod: %v", err)
+	}
+	modinfo := `name = "Custom Local"
+configuration_options = {
+  { name = "a", default = 1, options = { { description = "1", data = 1 }, { description = "5", data = 5 } } },
+  { name = "b", default = "x", options = { { description = "x", data = "x" } } },
+}
+`
+	if err := os.WriteFile(filepath.Join(localSrc, "modinfo.lua"), []byte(modinfo), 0o644); err != nil {
+		t.Fatalf("write local modinfo: %v", err)
+	}
+
+	// A mod the cluster already has keeps its own entry even when it is also a favorite.
+	existing := `return {
+  ["workshop-1909182187"] = { enabled = false, configuration_options = { k = "keep" } },
+}
+`
+	if err := fs.WriteModOverrides("fav_world", "master", existing); err != nil {
+		t.Fatalf("write modoverrides: %v", err)
+	}
+
+	for _, f := range []*db.ModFavorite{
+		{ModID: "workshop-378160973", ConfigurationOptions: map[string]any{"foo": float64(3)}},
+		{ModID: "local-custom", Name: "Custom Local", ConfigurationOptions: map[string]any{"a": float64(5)}},
+		{ModID: "workshop-1909182187"},
+	} {
+		if _, err := modSvc.SaveFavorite(f); err != nil {
+			t.Fatalf("save favorite %s: %v", f.ModID, err)
+		}
+	}
+	favs, err := store.ListModFavorites()
+	if err != nil || len(favs) != 3 {
+		t.Fatalf("expected 3 favorites, got %+v err=%v", favs, err)
+	}
+	for _, f := range favs {
+		if f.ModID == "workshop-1909182187" && f.ConfigurationOptions != nil {
+			t.Fatalf("favorite saved without settings should have nil config, got %+v", f.ConfigurationOptions)
+		}
+		if f.ModID == "workshop-378160973" && (f.WorkshopID != "378160973" || f.IsLocal) {
+			t.Fatalf("expected workshop favorite to carry its Workshop ID, got %+v", f)
+		}
+		if f.ModID == "local-custom" && !f.IsLocal {
+			t.Fatalf("expected local favorite, got %+v", f)
+		}
+	}
+
+	for _, bad := range []string{"../etc", "workshop-abc", "a/b", ""} {
+		_, err := modSvc.SaveFavorite(&db.ModFavorite{ModID: bad})
+		if code, _, _ := apperr.Extract(err, ""); code != apperr.CodeInvalidModID {
+			t.Fatalf("expected %s for %q, got %v", apperr.CodeInvalidModID, bad, err)
+		}
+	}
+
+	ctx := context.Background()
+	added, err := modSvc.AddFavoritesToCluster(ctx, "fav_world", "master",
+		[]string{"workshop-378160973", "local-custom", "workshop-1909182187", "local-custom"}, "zh-CN")
+	if err != nil {
+		t.Fatalf("add favorites: %v", err)
+	}
+	if strings.Join(added, ",") != "workshop-378160973,local-custom" {
+		t.Fatalf("expected only the missing favorites to be added, got %v", added)
+	}
+
+	for _, shard := range []string{"master", "caves"} {
+		raw, err := fs.ReadModOverrides("fav_world", shard)
+		if err != nil {
+			t.Fatalf("read %s overrides: %v", shard, err)
+		}
+		overrides, err := lua.ParseModOverrides(raw)
+		if err != nil {
+			t.Fatalf("parse %s overrides: %v", shard, err)
+		}
+		ws := overrides["workshop-378160973"]
+		if !ws.Enabled || fmt.Sprint(ws.ConfigurationOptions["foo"]) != "3" {
+			t.Fatalf("%s: expected workshop favorite enabled with saved config, got %+v", shard, ws)
+		}
+		local := overrides["local-custom"]
+		if !local.Enabled || fmt.Sprint(local.ConfigurationOptions["a"]) != "5" || local.ConfigurationOptions["b"] != "x" {
+			t.Fatalf("%s: expected saved config over defaults for local favorite, got %+v", shard, local)
+		}
+		kept := overrides["workshop-1909182187"]
+		if kept.Enabled || kept.ConfigurationOptions["k"] != "keep" {
+			t.Fatalf("%s: expected existing entry untouched, got %+v", shard, kept)
+		}
+	}
+
+	if _, err := modSvc.AddFavoritesToCluster(ctx, "fav_world", "master", []string{"workshop-111"}, "zh-CN"); err == nil {
+		t.Fatal("expected an error for a mod that is not a favorite")
 	}
 }

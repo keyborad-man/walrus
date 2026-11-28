@@ -113,6 +113,18 @@ type ModCache struct {
 	LastSyncedAt         time.Time `json:"last_synced_at"`
 }
 
+// ModFavorite is a panel-wide bookmarked mod. ConfigurationOptions is nil when the favorite
+// carries no settings of its own, in which case the mod's defaults apply when it is added.
+type ModFavorite struct {
+	ModID                string         `json:"mod_id"`
+	WorkshopID           string         `json:"workshop_id"`
+	IsLocal              bool           `json:"is_local"`
+	Name                 string         `json:"name"`
+	PreviewURL           string         `json:"preview_url"`
+	ConfigurationOptions map[string]any `json:"configuration_options"`
+	CreatedAt            time.Time      `json:"created_at"`
+}
+
 type PlayerHistory struct {
 	KUID          string    `json:"ku_id"`
 	LastName      string    `json:"last_name"`
