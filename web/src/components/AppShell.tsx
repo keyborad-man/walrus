@@ -318,7 +318,7 @@ export function AppShell() {
           <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <span className="truncate">{t('nav.openCommand')}</span>
         </span>
-        <kbd className="inline-flex items-center rounded border border-[var(--border-strong)] px-1.5 py-0.5 font-mono text-[10.5px] leading-none text-muted-foreground shrink-0">
+        <kbd className="inline-flex items-center rounded border border-[var(--border-strong)] px-1.5 py-0.5 font-mono text-[11px] leading-none text-muted-foreground shrink-0">
           Ctrl K
         </kbd>
       </button>
