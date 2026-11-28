@@ -314,6 +314,55 @@
   }
 }
 
+/* Outdated mod card: an amber light runs around the edge so it stands out in a long list.
+   Reduced motion keeps only the static amber edge and glow. */
+@property --mod-glow-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.mod-update-glow {
+  position: relative;
+  border-color: color-mix(in srgb, var(--color-amber-500) 45%, var(--border));
+  box-shadow: 0 0 24px -6px color-mix(in srgb, var(--color-amber-500) 60%, transparent);
+}
+
+.mod-update-glow::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  padding: 2px;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: conic-gradient(
+    from var(--mod-glow-angle),
+    transparent 0deg 240deg,
+    color-mix(in srgb, var(--color-amber-500) 70%, transparent) 295deg,
+    var(--color-amber-300) 330deg,
+    color-mix(in srgb, var(--color-amber-500) 70%, transparent) 345deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mod-update-glow::before {
+    opacity: 1;
+    animation: mod-glow-spin 3.2s linear infinite;
+  }
+}
+
+@keyframes mod-glow-spin {
+  to {
+    --mod-glow-angle: 360deg;
+  }
+}
+
 /* Subtle neutral architectural grid for auth surfaces */
 .dst-campfire-bg {
   background-image:

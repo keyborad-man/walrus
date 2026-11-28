@@ -601,6 +601,7 @@ export function ClusterModsPage() {
                   interactive={m.enabled}
                   className={cn(
                     !m.enabled && 'border-dashed bg-muted/40',
+                    outdatedModIds.has(m.mod_id) && 'mod-update-glow',
                     focusMod?.mod_id === m.mod_id && 'border-red-500/60 ring-2 ring-red-500/25',
                   )}
                 >
