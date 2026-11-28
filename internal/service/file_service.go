@@ -27,15 +27,15 @@ var editableExts = map[string]bool{
 }
 
 var protectedRelPaths = map[string]bool{
-	"":                 true,
-	".":                true,
-	"cluster.ini":      true,
-	"Master":           true,
-	"Caves":            true,
+	"":                  true,
+	".":                 true,
+	"cluster.ini":       true,
+	"Master":            true,
+	"Caves":             true,
 	"Master/server.ini": true,
 	"Caves/server.ini":  true,
-	"Master/save":      true,
-	"Caves/save":       true,
+	"Master/save":       true,
+	"Caves/save":        true,
 }
 
 type FileEntry struct {

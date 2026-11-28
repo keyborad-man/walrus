@@ -3,7 +3,7 @@ package dst
 // ClusterINI models DST's cluster.ini file.
 type ClusterINI struct {
 	// [GAMEPLAY]
-	GameMode       string `json:"game_mode"`        // survival | endless | wilderness | relaxed
+	GameMode       string `json:"game_mode"` // survival | endless | wilderness | relaxed
 	MaxPlayers     int    `json:"max_players"`
 	PVP            bool   `json:"pvp"`
 	PauseWhenEmpty bool   `json:"pause_when_empty"`
@@ -45,12 +45,12 @@ type ServerINI struct {
 
 // PortSet holds all non-conflicting ports assigned to one dual-shard cluster.
 type PortSet struct {
-	MasterServerPort int `json:"master_server_port"`
-	CavesServerPort  int `json:"caves_server_port"`
-	MasterAuthPort   int `json:"master_auth_port"`
-	CavesAuthPort    int `json:"caves_auth_port"`
-	MasterSteamPort  int `json:"master_steam_port"`
-	CavesSteamPort   int `json:"caves_steam_port"`
+	MasterServerPort  int `json:"master_server_port"`
+	CavesServerPort   int `json:"caves_server_port"`
+	MasterAuthPort    int `json:"master_auth_port"`
+	CavesAuthPort     int `json:"caves_auth_port"`
+	MasterSteamPort   int `json:"master_steam_port"`
+	CavesSteamPort    int `json:"caves_steam_port"`
 	ClusterMasterPort int `json:"cluster_master_port"`
 }
 

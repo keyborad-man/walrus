@@ -20,16 +20,16 @@ type ClusterSummary struct {
 	Description     string                   `json:"description"`
 	ClusterPassword string                   `json:"cluster_password,omitempty"`
 	GameMode        string                   `json:"game_mode"`
-	MaxPlayers     int                      `json:"max_players"`
-	CavesEnabled   bool                     `json:"caves_enabled"`
-	AutoRestart    bool                     `json:"auto_restart"`
-	MasterPort     int                      `json:"master_port"`
-	CavesPort      int                      `json:"caves_port,omitempty"`
-	MasterStatus   runtime.ShardStatus      `json:"master_status"`
-	CavesStatus    *runtime.ShardStatus     `json:"caves_status,omitempty"`
-	WorldInfo      runtime.WorldRuntimeInfo `json:"world_info"`
-	EffectiveRole  db.Role                  `json:"effective_role"`
-	HasToken       bool                     `json:"has_token"`
+	MaxPlayers      int                      `json:"max_players"`
+	CavesEnabled    bool                     `json:"caves_enabled"`
+	AutoRestart     bool                     `json:"auto_restart"`
+	MasterPort      int                      `json:"master_port"`
+	CavesPort       int                      `json:"caves_port,omitempty"`
+	MasterStatus    runtime.ShardStatus      `json:"master_status"`
+	CavesStatus     *runtime.ShardStatus     `json:"caves_status,omitempty"`
+	WorldInfo       runtime.WorldRuntimeInfo `json:"world_info"`
+	EffectiveRole   db.Role                  `json:"effective_role"`
+	HasToken        bool                     `json:"has_token"`
 }
 
 type ClusterDetail struct {
@@ -145,16 +145,16 @@ func (s *ClusterService) ListClusters(u *db.User) ([]ClusterSummary, error) {
 			Description:     ci.ClusterDescription,
 			ClusterPassword: ci.ClusterPassword,
 			GameMode:        ci.GameMode,
-			MaxPlayers:    ci.MaxPlayers,
-			CavesEnabled:  cavesEnabled,
-			AutoRestart:   autoRestart,
-			MasterPort:    masterPort,
-			CavesPort:     cavesPort,
-			MasterStatus:  masterSt,
-			CavesStatus:   cavesSt,
-			WorldInfo:     s.driver.GetWorldInfo(id),
-			EffectiveRole: effRole,
-			HasToken:      tok != "" || hasGlobalToken,
+			MaxPlayers:      ci.MaxPlayers,
+			CavesEnabled:    cavesEnabled,
+			AutoRestart:     autoRestart,
+			MasterPort:      masterPort,
+			CavesPort:       cavesPort,
+			MasterStatus:    masterSt,
+			CavesStatus:     cavesSt,
+			WorldInfo:       s.driver.GetWorldInfo(id),
+			EffectiveRole:   effRole,
+			HasToken:        tok != "" || hasGlobalToken,
 		}
 		out = append(out, summary)
 	}

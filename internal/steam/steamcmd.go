@@ -43,18 +43,18 @@ const (
 )
 
 type Status struct {
-	Installed      bool       `json:"installed"`
-	LocalVersion   string     `json:"local_version"`
-	RemoteVersion  string     `json:"remote_version"`
-	UpdateNeeded   bool       `json:"update_needed"`
-	Branch         string     `json:"branch"`
-	TaskState      TaskState  `json:"task_state"`
-	TaskKind       string     `json:"task_kind"` // "" | "server_update" | "mod_download"
-	LastError      string     `json:"last_error,omitempty"`
-	LastCheckedAt  *time.Time `json:"last_checked_at,omitempty"`
-	LastUpdatedAt  *time.Time `json:"last_updated_at,omitempty"`
-	SteamCMDReady  bool       `json:"steamcmd_ready"`
-	RuntimeMode    string     `json:"runtime_mode"`
+	Installed     bool       `json:"installed"`
+	LocalVersion  string     `json:"local_version"`
+	RemoteVersion string     `json:"remote_version"`
+	UpdateNeeded  bool       `json:"update_needed"`
+	Branch        string     `json:"branch"`
+	TaskState     TaskState  `json:"task_state"`
+	TaskKind      string     `json:"task_kind"` // "" | "server_update" | "mod_download"
+	LastError     string     `json:"last_error,omitempty"`
+	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
+	LastUpdatedAt *time.Time `json:"last_updated_at,omitempty"`
+	SteamCMDReady bool       `json:"steamcmd_ready"`
+	RuntimeMode   string     `json:"runtime_mode"`
 }
 
 type LogLine struct {
