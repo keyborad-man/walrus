@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 import {
   AlertTriangle,
@@ -54,6 +55,15 @@ const isClusterActive = (c: ClusterSummary) =>
 
 const clusterName = (c: ClusterSummary) => c.cluster_name || c.cluster_id
 
+const isCrashed = (c: ClusterSummary) =>
+  getClusterHealth(c.master_status, c.caves_enabled, c.caves_status) === 'crashed'
+
+/** First non-empty line of a shard's last error, for a one-line summary. */
+const crashErrors = (c: ClusterSummary) =>
+  [c.master_status, c.caves_enabled ? c.caves_status : undefined]
+    .filter((s): s is ShardStatus => Boolean(s && s.state === 'crashed' && s.last_error))
+    .map((s) => s.last_error as string)
+
 const DETAILS_STORAGE_KEY = 'walrus-dashboard-details-open'
 
 function readOpenDetails(): string[] {
@@ -76,6 +86,12 @@ function writeOpenDetails(id: string, open: boolean) {
     // Storage can be unavailable (private mode); the toggle still works for this visit.
   }
 }
+
+const crashedShardNames = (c: ClusterSummary, t: TFunction) =>
+  [
+    c.master_status.state === 'crashed' ? t('common.masterShort') : null,
+    c.caves_enabled && c.caves_status?.state === 'crashed' ? t('common.cavesShort') : null,
+  ].filter((x): x is string => Boolean(x))
 
 const totalRestarts = (c: ClusterSummary) =>
   (c.master_status.restart_count ?? 0) + (c.caves_enabled ? (c.caves_status?.restart_count ?? 0) : 0)
@@ -110,6 +126,7 @@ export function DashboardPage() {
     isError: clustersErrorFlag,
     error: clustersError,
     refetch: refetchClusters,
+    dataUpdatedAt: clustersUpdatedAt,
   } = useQuery({
     queryKey: ['clusters'],
     queryFn: api.listClusters,
@@ -143,7 +160,8 @@ export function DashboardPage() {
     return null
   }
 
-  const stoppedOperable = operableClusters.filter((c) => !isClusterActive(c))
+  // Crashed worlds are left out: they should be looked at, not restarted in bulk.
+  const stoppedOperable = operableClusters.filter((c) => !isClusterActive(c) && !isCrashed(c))
   const batchStartTargets = stoppedOperable.filter((c) => !startBlockReason(c))
   const batchStopTargets = operableClusters.filter(
     (c) => c.master_status.state === 'running' || c.caves_status?.state === 'running',
@@ -275,11 +293,9 @@ export function DashboardPage() {
   const showBatchStart = stoppedOperable.length >= 2
   const showBatchStop = batchStopTargets.length >= 2
 
-  const isCrashed = (c: ClusterSummary) =>
-    getClusterHealth(c.master_status, c.caves_enabled, c.caves_status) === 'crashed'
-  // A crash is the moment the owner actually opens the panel, so it leads the page instead of
-  // hiding among stopped worlds. A partly-running crashed world keeps its card too: friends may still be in.
-  const crashedClusters = filteredClusters.filter(isCrashed)
+  // A crash is the moment the owner actually opens the panel. A fully-down crashed world leads the page;
+  // a partly-running one keeps a single card that carries the crash inside it, so it never appears twice.
+  const crashedClusters = filteredClusters.filter((c) => isCrashed(c) && !isClusterActive(c))
   const awakeClusters = filteredClusters.filter(isClusterActive)
   const asleepClusters = filteredClusters.filter((c) => !isClusterActive(c) && !isCrashed(c))
 
@@ -441,9 +457,18 @@ export function DashboardPage() {
           </div>
         )}
 
+        {clustersErrorFlag && clustersData && (
+          <p
+            role="status"
+            className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[13px] text-amber-800 dark:text-amber-300"
+          >
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            {t('dashboard.staleData', { seconds: Math.max(1, Math.round((Date.now() - clustersUpdatedAt) / 1000)) })}
+          </p>
+        )}
         {isLoading ? (
           <DashboardSkeleton />
-        ) : clustersErrorFlag ? (
+        ) : clustersErrorFlag && !clustersData ? (
           <QueryErrorCard error={clustersError} onRetry={() => void refetchClusters()} />
         ) : clusters.length === 0 ? (
           <EmptyLobby
@@ -459,16 +484,14 @@ export function DashboardPage() {
         ) : (
           <div className="flex flex-col gap-4">
             {crashedClusters.length > 0 && (
-              <ul aria-label={t('dashboard.crashedHeading')} className="order-first space-y-2">
+              <ul aria-label={t('dashboard.crashedHeading')} className="space-y-2">
                 {crashedClusters.map((c) => (
                   <CrashedWorldRow
                     key={c.cluster_id}
                     cluster={c}
                     busy={busyClusterId === c.cluster_id || batchBusy}
                     startBlockReason={startBlockReason(c)}
-                    onRecover={() =>
-                      isClusterActive(c) ? requestClusterAction('restart', c) : startMut.mutate(c.cluster_id)
-                    }
+                    onRecover={() => startMut.mutate(c.cluster_id)}
                   />
                 ))}
               </ul>
@@ -491,7 +514,7 @@ export function DashboardPage() {
               </div>
             )}
             {asleepClusters.length > 0 && (
-              <div className="order-first space-y-2 xl:order-none">
+              <div className="space-y-2">
                 {awakeClusters.length > 0 && (
                   <h3 className="text-[13px] font-medium text-muted-foreground">
                     {t('dashboard.asleepHeading', { count: asleepClusters.length })}
@@ -667,6 +690,8 @@ function WorldCard({
   const health = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
   const restarts = totalRestarts(c)
   const lit = health === 'running' && c.world_info?.day > 0
+  // Forest down means nobody can be in the world, whatever the caves report.
+  const masterCrashed = c.master_status.state === 'crashed'
   const running = c.master_status.state === 'running'
   const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
   const players = c.world_info?.online_players ?? []
@@ -679,7 +704,7 @@ function WorldCard({
       aria-label={name}
       className={cn(
         '@container flex flex-col rounded-xl surface-card surface-interactive overflow-hidden',
-        lit && 'border-[color-mix(in_srgb,var(--ember)_38%,var(--border))]',
+        lit && 'border-[color-mix(in_srgb,var(--ember)_55%,var(--border))]',
       )}
     >
       <header className="flex items-start justify-between gap-3 px-5 pt-4">
@@ -706,7 +731,7 @@ function WorldCard({
           {restarts > 0 && (
             <Link
               to={`/clusters/${encodeURIComponent(c.cluster_id)}/console`}
-              className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[12px] font-medium text-amber-800 hover:underline dark:text-amber-300"
+              className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[12px] font-medium text-amber-800 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-amber-300"
             >
               <CircleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />
               {t('dashboard.crashRestarts', { count: restarts })}
@@ -715,15 +740,38 @@ function WorldCard({
         </div>
       </header>
 
-      <div className="grid flex-1 content-start items-start gap-x-6 gap-y-4 px-5 py-4 @md:grid-cols-2 @3xl:grid-cols-[minmax(0,2fr)_minmax(0,1.15fr)]">
-        <div className="flex min-w-0 flex-col gap-4 @3xl:grid @3xl:grid-cols-2 @3xl:gap-6">
-          <WorldClock cluster={c} running={running} />
-          {running && <PlayerList players={players} max={c.max_players} isEn={isEn} />}
+      {health === 'crashed' && (
+        <div className="mx-5 mt-4 flex items-start gap-2.5 rounded-lg border border-red-500/35 bg-red-500/[0.07] px-3.5 py-3">
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-semibold text-foreground">
+              {t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
+            </p>
+            <CrashReason errors={crashErrors(c)} />
+            <Link
+              to={`/clusters/${encodeURIComponent(c.cluster_id)}/console`}
+              className="mt-2 inline-flex items-center gap-1 text-[13px] font-medium text-foreground underline underline-offset-2 hover:opacity-80"
+            >
+              <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
+              {t('dashboard.viewLogs')}
+            </Link>
+          </div>
         </div>
-        {running && (
-          <JoinInfo cluster={c} connectHost={connectHost} hostIsGuess={hostIsGuess} isAdmin={isAdmin} />
-        )}
-      </div>
+      )}
+
+      {masterCrashed ? (
+        <div className="flex-1" />
+      ) : (
+        <div className="grid flex-1 content-start items-start gap-x-6 gap-y-4 px-5 py-4 @md:grid-cols-2 @3xl:grid-cols-[minmax(0,2fr)_minmax(0,1.15fr)]">
+          <div className="flex min-w-0 flex-col gap-4 @3xl:grid @3xl:grid-cols-2 @3xl:gap-6">
+            <WorldClock cluster={c} running={running} />
+            {running && <PlayerList players={players} max={c.max_players} isEn={isEn} />}
+          </div>
+          {running && (
+            <JoinInfo cluster={c} connectHost={connectHost} hostIsGuess={hostIsGuess} isAdmin={isAdmin} />
+          )}
+        </div>
+      )}
 
       <div className="border-t border-border">
         <button
@@ -803,7 +851,10 @@ function Readiness({ cluster: c, health }: { cluster: ClusterSummary; health: Co
   } else if (health === 'running') {
     tone = c.world_info?.day > 0 ? 'ok' : 'wait'
     text = c.world_info?.day > 0 ? t('dashboard.readyYes') : t('dashboard.readyWaking')
-  } else if (health === 'degraded' || health === 'crashed') {
+  } else if (health === 'crashed') {
+    tone = 'warn'
+    text = masterUp ? t('dashboard.readyCavesCrashed') : t('dashboard.readyForestCrashed')
+  } else if (health === 'degraded') {
     tone = 'warn'
     text = masterUp ? t('dashboard.readyForestOnly') : t('dashboard.readyNo')
   } else if (health === 'stopping') {
@@ -814,15 +865,48 @@ function Readiness({ cluster: c, health }: { cluster: ClusterSummary; health: Co
   return (
     <p
       className={cn(
-        'mt-2 flex items-center gap-1.5 text-[13px] font-medium',
-        tone === 'ok' && 'text-emerald-700 dark:text-emerald-400',
-        tone === 'warn' && 'text-amber-800 dark:text-amber-300',
-        tone === 'wait' && 'text-muted-foreground',
+        'mt-2.5 inline-flex w-fit items-center gap-1.5 rounded-md px-2 py-1 text-[14px] font-semibold',
+        tone === 'ok' && 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400',
+        tone === 'warn' && 'bg-amber-500/12 text-amber-800 dark:text-amber-300',
+        tone === 'wait' && 'bg-[var(--surface-elevated)] text-muted-foreground',
       )}
     >
       <Icon className={cn('h-3.5 w-3.5 shrink-0', tone === 'wait' && 'animate-spin')} aria-hidden="true" />
       {text}
     </p>
+  )
+}
+
+/** The shard's own last error: first line up front, the rest one click away. */
+function CrashReason({ errors }: { errors: string[] }) {
+  const { t } = useTranslation()
+  if (errors.length === 0) return <p className="mt-1 text-[13px] text-muted-foreground">{t('dashboard.crashedHint')}</p>
+  const full = errors.join('\n\n')
+  const firstLine = full.split('\n').find((l) => l.trim()) ?? full
+  const hasMore = full.trim() !== firstLine.trim()
+
+  return (
+    <div className="mt-1.5 min-w-0">
+      <p className="text-[12px] font-medium text-muted-foreground">{t('dashboard.crashReason')}</p>
+      {hasMore ? (
+        <details className="group mt-0.5">
+          <summary className="flex cursor-pointer list-none items-start gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+            <code className="min-w-0 flex-1 truncate text-[12px] text-red-800 group-open:hidden dark:text-red-300">{firstLine}</code>
+            <span className="shrink-0 text-[12px] text-muted-foreground underline underline-offset-2 group-open:hidden">
+              {t('dashboard.showFullError')}
+            </span>
+            <span className="hidden shrink-0 text-[12px] text-muted-foreground underline underline-offset-2 group-open:inline">
+              {t('dashboard.hideFullError')}
+            </span>
+          </summary>
+          <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--surface-terminal)] px-3 py-2 font-mono text-[12px] leading-relaxed text-[var(--foreground)]">
+            {full}
+          </pre>
+        </details>
+      ) : (
+        <code className="mt-0.5 block break-words text-[12px] text-red-800 dark:text-red-300">{firstLine}</code>
+      )}
+    </div>
   )
 }
 
@@ -842,24 +926,21 @@ function CrashedWorldRow({
   const name = clusterName(c)
   const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
   const restarts = totalRestarts(c)
-  const crashedShards = [
-    c.master_status.state === 'crashed' ? t('common.masterShort') : null,
-    c.caves_enabled && c.caves_status?.state === 'crashed' ? t('common.cavesShort') : null,
-  ].filter(Boolean)
+  const crashedShards = crashedShardNames(c, t)
   const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
   const base = `/clusters/${encodeURIComponent(c.cluster_id)}`
 
   return (
-    <li className="flex flex-wrap items-center gap-x-4 gap-y-2.5 rounded-xl border border-red-500/40 bg-red-500/[0.07] px-4 py-3 sm:px-5">
-      <CircleAlert className="h-5 w-5 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
+    <li className="flex flex-wrap items-start gap-x-4 gap-y-2.5 rounded-xl border border-red-500/40 bg-red-500/[0.07] px-4 py-3 sm:px-5">
+      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
       <div className="min-w-0 flex-1 basis-56">
         <p className="text-[14px] font-semibold text-foreground">
           {t('dashboard.crashedTitle', { name, shards: crashedShards.join('、') })}
         </p>
-        <p className="mt-0.5 text-[13px] text-muted-foreground text-pretty">
-          {restarts > 0 && c.auto_restart ? t('dashboard.crashedAutoRestarted', { count: restarts }) : ''}
-          {t('dashboard.crashedHint')}
-        </p>
+        {restarts > 0 && c.auto_restart && (
+          <p className="mt-0.5 text-[13px] text-muted-foreground">{t('dashboard.crashedAutoRestarted', { count: restarts })}</p>
+        )}
+        <CrashReason errors={crashErrors(c)} />
       </div>
       <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
         {!canOperate && <span className="text-[13px] text-muted-foreground">{t('dashboard.needOperator')}</span>}
@@ -932,7 +1013,13 @@ function SleepingWorldRow({
       <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
         {note && <span className="text-[13px] text-muted-foreground">{note}</span>}
         {canOperate && (
-          <Button size="sm" disabled={busy || !!startBlockReason} onClick={onStart} aria-label={forWorld(t('dashboard.startWorld'))}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || !!startBlockReason}
+            onClick={onStart}
+            aria-label={forWorld(t('dashboard.startWorld'))}
+          >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
             {t('dashboard.startWorld')}
           </Button>
@@ -968,7 +1055,7 @@ function WorldClock({ cluster: c, running }: { cluster: ClusterSummary; running:
             aria-hidden="true"
             className="absolute -inset-3 rounded-full auth-campfire-breathe"
             style={{
-              background: 'radial-gradient(circle, color-mix(in srgb, var(--ember) 30%, transparent) 0%, transparent 70%)',
+              background: 'radial-gradient(circle, color-mix(in srgb, var(--ember) 42%, transparent) 0%, transparent 70%)',
             }}
           />
         )}
@@ -1090,7 +1177,7 @@ function JoinInfo({
   const copyConnect = async () => {
     if (!connectCmd) return
     const ok = await copyTextWithFallback(connectCmd)
-    if (ok) toast.success(t('dashboard.connectCopied'), { description: t('dashboard.connectHowTo') })
+    if (ok) toast.success(t('dashboard.connectCopied'))
     else toast.error(t('common.copyFailed'))
   }
 
@@ -1121,7 +1208,7 @@ function JoinInfo({
       <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-1 text-[13px]">
         <dt className="text-muted-foreground">{t('dashboard.lobbyName')}</dt>
         <dd className="flex min-w-0 items-center justify-end gap-0.5">
-          <span className="truncate text-foreground">{clusterName(c)}</span>
+          <span className="min-w-0 break-all text-right text-foreground">{clusterName(c)}</span>
           <CopyButton value={clusterName(c)} label={t('dashboard.copyLobbyName')} />
         </dd>
         <dt className="text-muted-foreground">{t('dashboard.roomPassword')}</dt>
@@ -1135,7 +1222,7 @@ function JoinInfo({
                 type="button"
                 onClick={() => setRevealed((v) => !v)}
                 aria-label={revealed ? t('dashboard.hidePassword') : t('dashboard.showPassword')}
-                className="relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer"
+                className="relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring cursor-pointer before:absolute before:-inset-2 before:content-[''] sm:before:hidden"
               >
                 {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
               </button>
@@ -1148,7 +1235,7 @@ function JoinInfo({
       </dl>
       {connectCmd && (
         <div className="mt-2.5">
-          <Button size="sm" variant="outline" className="w-full" onClick={() => void copyConnect()}>
+          <Button size="sm" className="w-full" onClick={() => void copyConnect()}>
             <Copy className="h-3.5 w-3.5" />
             {t('dashboard.copyDirectConnect')}
           </Button>
