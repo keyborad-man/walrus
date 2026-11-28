@@ -8,11 +8,6 @@ import (
 	"strings"
 )
 
-// DefaultSteamAPIKey may be injected at build time via:
-// -ldflags "-X walrus/internal/config.DefaultSteamAPIKey=<your_key>"
-// Users can override it via WALRUS_STEAM_API_KEY, --steam-api-key, or System Settings.
-var DefaultSteamAPIKey = ""
-
 // Config holds the runtime configuration for Walrus.
 type Config struct {
 	Addr          string // HTTP listen address, e.g. ":8080"
@@ -38,7 +33,7 @@ func Load() *Config {
 		DataDir:      envOr("WALRUS_DATA_DIR", "./data"),
 		RuntimeMode:  strings.ToLower(envOr("WALRUS_RUNTIME", "auto")),
 		JWTSecret:    os.Getenv("WALRUS_JWT_SECRET"),
-		SteamAPIKey:  envOr("WALRUS_STEAM_API_KEY", strings.TrimSpace(DefaultSteamAPIKey)),
+		SteamAPIKey:  envOr("WALRUS_STEAM_API_KEY", ""),
 		ProxyURL:     strings.TrimSpace(os.Getenv("WALRUS_PROXY_URL")),
 		DevMode:      envBool("WALRUS_DEV", false),
 		StaticDir:    os.Getenv("WALRUS_STATIC_DIR"),
