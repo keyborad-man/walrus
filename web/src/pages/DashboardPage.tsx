@@ -34,7 +34,6 @@ import { cn, type CompositeClusterHealth, formatUptime, getClusterHealth } from 
 import { useAuth } from '@/hooks/useAuth'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { CopyButton, copyTextWithFallback } from '@/components/ui/copy-button'
-import { CollapsibleContent } from '@/components/ui/collapsible'
 import { DashboardSkeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/PageHeader'
 import { DSTClockDial, ShardStateBadge } from '@/components/StatusBadge'
@@ -64,29 +63,6 @@ const crashErrors = (c: ClusterSummary) =>
   [c.master_status, c.caves_enabled ? c.caves_status : undefined]
     .filter((s): s is ShardStatus => Boolean(s && s.state === 'crashed' && s.last_error))
     .map((s) => s.last_error as string)
-
-const DETAILS_STORAGE_KEY = 'walrus-dashboard-details-open'
-
-function readOpenDetails(): string[] {
-  try {
-    const raw = localStorage.getItem(DETAILS_STORAGE_KEY)
-    const parsed: unknown = raw ? JSON.parse(raw) : []
-    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function writeOpenDetails(id: string, open: boolean) {
-  try {
-    const next = new Set(readOpenDetails())
-    if (open) next.add(id)
-    else next.delete(id)
-    localStorage.setItem(DETAILS_STORAGE_KEY, JSON.stringify([...next]))
-  } catch {
-    // Storage can be unavailable (private mode); the toggle still works for this visit.
-  }
-}
 
 const crashedShardNames = (c: ClusterSummary, t: TFunction) =>
   [
@@ -786,13 +762,6 @@ function WorldCard({
 }) {
   const { t, i18n } = useTranslation()
   const isEn = i18n.language === 'en-US'
-  const [detailsOpen, setDetailsOpen] = useState(() => readOpenDetails().includes(c.cluster_id))
-  const toggleDetails = () =>
-    setDetailsOpen((v) => {
-      writeOpenDetails(c.cluster_id, !v)
-      return !v
-    })
-
   const name = clusterName(c)
   const health = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
   const restarts = totalRestarts(c)
@@ -803,7 +772,6 @@ function WorldCard({
   const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
   const players = c.world_info?.online_players ?? []
   const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
-  const detailsId = `world-details-${c.cluster_id}`
   const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
 
   return (
@@ -831,11 +799,9 @@ function WorldCard({
             </span>
             {c.caves_enabled ? t('dashboard.worldsForestCaves') : t('dashboard.worldsForestOnly')}
           </p>
-          {health !== 'crashed' && <Readiness cluster={c} health={health} />}
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-1.5 pt-0.5">
-          {/* A partial crash is serious but not total: say so with amber, not the red of a dead world. */}
-          <ShardStateBadge state={health === 'crashed' ? 'degraded' : health} />
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <StartupStatus cluster={c} health={health} />
           {restarts > 0 && health !== 'crashed' && (
             <Link
               to={`/clusters/${encodeURIComponent(c.cluster_id)}/console`}
@@ -878,8 +844,8 @@ function WorldCard({
       {masterCrashed ? (
         <div className="flex-1" />
       ) : (
-        <div className="grid flex-1 content-start items-start gap-x-6 gap-y-4 px-5 py-4 @md:grid-cols-2 @3xl:grid-cols-[minmax(0,2fr)_minmax(0,1.15fr)]">
-          <div className="flex min-w-0 flex-col gap-4 @3xl:grid @3xl:grid-cols-2 @3xl:gap-6">
+        <div className="grid flex-1 content-start items-start gap-x-8 gap-y-5 px-5 py-5 @md:grid-cols-2 @3xl:grid-cols-[minmax(0,2fr)_minmax(0,1.15fr)] @3xl:items-center">
+          <div className="flex min-w-0 flex-col gap-5 @3xl:grid @3xl:grid-cols-2 @3xl:gap-8">
             <WorldClock cluster={c} running={running} />
             {running && <PlayerList players={players} max={c.max_players} isEn={isEn} />}
           </div>
@@ -894,46 +860,33 @@ function WorldCard({
         </div>
       )}
 
-      <div className="border-t border-border">
-        <button
-          type="button"
-          aria-expanded={detailsOpen}
-          aria-controls={detailsId}
-          aria-label={forWorld(t('dashboard.techDetails'))}
-          onClick={toggleDetails}
-          className="flex w-full min-h-10 items-center justify-between gap-2 px-5 text-[13px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        >
-          <span>{t('dashboard.techDetails')}</span>
-          <ChevronDown
-            className={cn(
-              'h-3.5 w-3.5 [transition:transform_200ms_var(--ease-out)] motion-reduce:transition-none',
-              detailsOpen && 'rotate-180',
-            )}
-            aria-hidden="true"
-          />
-        </button>
-        <CollapsibleContent open={detailsOpen}>
-          <div id={detailsId} className="space-y-2 px-5 pb-4">
-            <ShardDetail label={t('common.masterShort')} port={c.master_port} status={c.master_status} />
-            {c.caves_enabled && c.caves_status && (
-              <ShardDetail label={t('common.cavesShort')} port={c.caves_port} status={c.caves_status} />
-            )}
-            <p className="pt-1 text-[12px] text-muted-foreground">
-              {t('dashboard.clusterDir')} <code className="text-foreground/85">{c.cluster_id}</code>
-              {c.auto_restart && (
-                <>
-                  <span aria-hidden="true" className="mx-1.5 opacity-50">
-                    ·
-                  </span>
-                  {t('dashboard.autoRestartOn')}
-                </>
-              )}
-            </p>
-          </div>
-        </CollapsibleContent>
+      {/* Each shard's own state, always in view: which half of the world came up, and what it costs the host. */}
+      <div
+        className={cn(
+          'grid border-t border-border bg-[var(--surface-elevated)]/40',
+          c.caves_enabled && c.caves_status
+            ? 'divide-y divide-border @xl:grid-cols-2 @xl:divide-x @xl:divide-y-0'
+            : '',
+        )}
+      >
+        <ShardDetail label={t('common.masterShort')} port={c.master_port} status={c.master_status} />
+        {c.caves_enabled && c.caves_status && (
+          <ShardDetail label={t('common.cavesShort')} port={c.caves_port} status={c.caves_status} />
+        )}
       </div>
 
       <footer className="flex flex-wrap items-center justify-end gap-x-2 gap-y-2 border-t border-border px-5 py-3">
+        <p className="mr-auto w-full min-w-0 text-[12px] text-muted-foreground @xl:w-auto">
+          {t('dashboard.clusterDir')} <code className="text-foreground/85">{c.cluster_id}</code>
+          {c.auto_restart && (
+            <>
+              <span aria-hidden="true" className="mx-1.5 opacity-50">
+                ·
+              </span>
+              {t('dashboard.autoRestartOn')}
+            </>
+          )}
+        </p>
         {canOperate && (
           <>
             <Button size="sm" variant="ghost" disabled={busy} onClick={onStop} aria-label={forWorld(t('dashboard.stopAll'))}>
@@ -966,42 +919,56 @@ function WorldCard({
   )
 }
 
-/** One line that answers the question the owner actually has: can my friends get in right now? */
-function Readiness({ cluster: c, health }: { cluster: ClusterSummary; health: CompositeClusterHealth }) {
+/** Did the world start? The backend only reports "running" once the shard has loaded its world. */
+function StartupStatus({ cluster: c, health }: { cluster: ClusterSummary; health: CompositeClusterHealth }) {
   const { t } = useTranslation()
   const masterUp = c.master_status.state === 'running'
 
   let tone: 'ok' | 'wait' | 'warn' = 'wait'
-  let text = t('dashboard.readyStarting')
-  if (!c.has_token) {
-    tone = 'warn'
-    text = t('dashboard.readyNoToken')
-  } else if (health === 'running') {
-    tone = c.world_info?.day > 0 ? 'ok' : 'wait'
-    text = c.world_info?.day > 0 ? t('dashboard.readyYes') : t('dashboard.readyWaking')
+  let text = t('common.starting')
+  if (health === 'running') {
+    tone = 'ok'
+    text = t('dashboard.startOk')
   } else if (health === 'crashed') {
+    // A partial crash is serious but not total: amber, not the red of a dead world.
     tone = 'warn'
-    text = masterUp ? t('dashboard.readyCavesCrashed') : t('dashboard.readyForestCrashed')
+    text = t('dashboard.startPartlyCrashed')
   } else if (health === 'degraded') {
     tone = 'warn'
-    text = masterUp ? t('dashboard.readyForestOnly') : t('dashboard.readyNo')
+    text = masterUp ? t('dashboard.startCavesDown') : t('dashboard.startForestDown')
   } else if (health === 'stopping') {
-    text = t('dashboard.readyStopping')
+    text = t('common.stopping')
   }
+  const uptime = health === 'running' ? c.master_status.uptime_sec : 0
 
-  const Icon = tone === 'ok' ? CheckCircle2 : tone === 'warn' ? AlertTriangle : Loader2
   return (
-    <p
-      className={cn(
-        'mt-2.5 inline-flex w-fit items-center gap-1.5 rounded-md px-2 py-1 text-[14px] font-semibold',
-        tone === 'ok' && 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400',
-        tone === 'warn' && 'bg-amber-500/12 text-amber-800 dark:text-amber-300',
-        tone === 'wait' && 'bg-[var(--surface-elevated)] text-muted-foreground',
+    <div className="flex flex-col items-end gap-1">
+      <p
+        className={cn(
+          'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[13px] font-semibold',
+          tone === 'ok' && 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-400',
+          tone === 'warn' && 'bg-amber-500/12 text-amber-800 dark:text-amber-300',
+          tone === 'wait' && 'bg-[var(--surface-elevated)] text-muted-foreground',
+        )}
+      >
+        {tone === 'ok' ? (
+          <span className="relative inline-flex h-2 w-2 shrink-0 items-center justify-center" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-500/45 dst-live-ring" />
+            <span className="relative inline-flex h-[7px] w-[7px] rounded-full bg-emerald-600 dark:bg-emerald-500" />
+          </span>
+        ) : tone === 'warn' ? (
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+        ) : (
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />
+        )}
+        {text}
+      </p>
+      {uptime > 0 && (
+        <p className="text-[12px] text-muted-foreground tabular-nums">
+          {t('dashboard.uptime')} {formatUptime(uptime)}
+        </p>
       )}
-    >
-      <Icon className={cn('h-3.5 w-3.5 shrink-0', tone === 'wait' && 'animate-spin')} aria-hidden="true" />
-      {text}
-    </p>
+    </div>
   )
 }
 
@@ -1418,9 +1385,9 @@ function PlayerList({
 
   return (
     <div className="min-w-0">
-      <div className="flex items-baseline gap-1.5 tabular-nums">
+      <div className="flex items-baseline gap-1 leading-none whitespace-nowrap tabular-nums">
         <span className="text-[13px] text-muted-foreground">{t('dashboard.onlineNow')}</span>
-        <span className="text-[15px] font-semibold text-foreground">{players.length}</span>
+        <span className="font-display text-[30px] text-foreground">{players.length}</span>
         <span className="text-[13px] text-muted-foreground">/ {max}</span>
       </div>
       {players.length > 0 ? (
@@ -1571,27 +1538,28 @@ function ShardDetail({
   const active = status.state === 'running' || status.state === 'starting'
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] tabular-nums">
-      <span className="w-10 shrink-0 font-medium text-foreground">{label}</span>
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5 text-[12px] tabular-nums">
+      <span className="text-[13px] font-medium text-foreground">{label}</span>
       <ShardStateBadge state={status.state} />
-      {port ? (
-        <span className="inline-flex items-center gap-1 text-muted-foreground">
-          {t('dashboard.port')}
-          <code className="text-foreground/85">{port}</code>
-          <CopyButton value={String(port)} label={t('dashboard.copyPort', { port })} />
-        </span>
-      ) : null}
-      {active && (
-        <span className="text-muted-foreground">
-          CPU {status.cpu_percent}% · {t('dashboard.memory')} {Math.round(status.memory_mb)} MB ·{' '}
-          {t('dashboard.uptime')} {formatUptime(status.uptime_sec)}
-        </span>
-      )}
-      {status.restart_count > 0 && (
-        <span className="text-amber-700 dark:text-amber-400">
-          {t('dashboard.crashRestarts', { count: status.restart_count })}
-        </span>
-      )}
+      <span className="ml-auto inline-flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+        {port ? (
+          <span className="inline-flex items-center gap-1">
+            {t('dashboard.port')}
+            <code className="text-foreground/85">{port}</code>
+          </span>
+        ) : null}
+        {active && <span>CPU {Math.round(status.cpu_percent)}%</span>}
+        {active && (
+          <span>
+            {t('dashboard.memory')} {Math.round(status.memory_mb)} MB
+          </span>
+        )}
+        {status.restart_count > 0 && (
+          <span className="text-amber-700 dark:text-amber-400">
+            {t('dashboard.crashRestarts', { count: status.restart_count })}
+          </span>
+        )}
+      </span>
     </div>
   )
 }
@@ -1610,7 +1578,7 @@ function HostStrip({
   return (
     <section
       aria-label={t('dashboard.hostStripLabel')}
-      className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-[10px] border border-border px-4 py-2.5 text-[13px] tabular-nums"
+      className="flex flex-wrap items-center gap-x-6 gap-y-2.5 rounded-[10px] border border-border px-5 py-3 text-[13px] tabular-nums"
     >
       <span className="font-medium text-muted-foreground">{t('dashboard.hostStripLabel')}</span>
       {metrics ? (
@@ -1665,6 +1633,15 @@ function HostMetric({ label, value, percent }: { label: string; value: string; p
     >
       {level !== 'normal' && <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />}
       <span className={level === 'normal' ? 'text-muted-foreground' : undefined}>{label}</span>
+      <span className="relative h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-foreground/10" aria-hidden="true">
+        <span
+          className={cn(
+            'absolute inset-y-0 left-0 rounded-full',
+            level === 'critical' ? 'bg-red-500' : level === 'elevated' ? 'bg-amber-500' : 'bg-foreground/45',
+          )}
+          style={{ width: `${Math.min(100, Math.max(2, percent))}%` }}
+        />
+      </span>
       <span className={cn('font-medium', level === 'normal' && 'text-foreground')}>{value}</span>
       {level !== 'normal' && (
         <span className="font-medium">
