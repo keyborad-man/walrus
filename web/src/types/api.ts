@@ -359,6 +359,21 @@ export interface ClusterModItem {
   configuration_options: Record<string, unknown>
 }
 
+export interface OutdatedMod {
+  mod_id: string
+  workshop_id: string
+  name: string
+  local_time_updated: number
+  remote_time_updated: number
+  missing: boolean
+}
+
+export interface ModUpdateCheckResult {
+  checked_count: number
+  outdated: OutdatedMod[] | null
+  affected_clusters: string[] | null
+}
+
 export interface ClusterModsResponse {
   shard: string
   mod_sync_enabled: boolean

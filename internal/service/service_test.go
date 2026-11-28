@@ -737,6 +737,15 @@ func TestCronModUpdateCheckAndAutoUpgrade(t *testing.T) {
 version = "1.7.0"`), 0o644); err != nil {
 		t.Fatalf("write modinfo: %v", err)
 	}
+
+	ctx := context.Background()
+	if err := clusterSvc.StartCluster(ctx, "c1"); err != nil {
+		t.Fatalf("start c1: %v", err)
+	}
+	defer func() { _ = clusterSvc.StopCluster(ctx, "c1") }()
+	time.Sleep(1500 * time.Millisecond)
+
+	// The Workshop item gets a new version while c1 is running (startup already updated it).
 	// Even if TimeUpdated was already touched (e.g. by preview backfill), InstalledTimeUpdated governs update detection.
 	if err := store.UpsertModCache(&db.ModCache{
 		ModID:                "workshop-378160973",
@@ -747,13 +756,6 @@ version = "1.7.0"`), 0o644); err != nil {
 	}); err != nil {
 		t.Fatalf("upsert mod cache: %v", err)
 	}
-
-	ctx := context.Background()
-	if err := clusterSvc.StartCluster(ctx, "c1"); err != nil {
-		t.Fatalf("start c1: %v", err)
-	}
-	defer func() { _ = clusterSvc.StopCluster(ctx, "c1") }()
-	time.Sleep(1500 * time.Millisecond)
 
 	// 1. Notify-only mode should report 1 mod update available without touching installed_time_updated.
 	notifyTask, err := store.CreateScheduledTask(&db.ScheduledTask{
@@ -832,6 +834,92 @@ version = "1.7.0"`), 0o644); err != nil {
 	mu.Unlock()
 	if !strings.Contains(joined, "mod.update_available") || !strings.Contains(joined, "mod.update_complete") {
 		t.Fatalf("expected mod update webhooks, got %q", joined)
+	}
+}
+
+func TestStartShardUpdatesOutdatedWorkshopMods(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		steamDown    bool
+		wantInstTime int64
+	}{
+		{name: "updates before launch", wantInstTime: 1800000000},
+		{name: "steam unreachable still launches", steamDown: true, wantInstTime: 1700000000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			store, err := db.Open(filepath.Join(tmp, "test.db"))
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer store.Close()
+
+			wsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.steamDown {
+					w.WriteHeader(http.StatusBadGateway)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"response": map[string]any{
+						"publishedfiledetails": []map[string]any{
+							{"publishedfileid": "378160973", "result": 1, "title": "Global Positions", "time_updated": 1800000000},
+						},
+					},
+				})
+			}))
+			defer wsSrv.Close()
+
+			dstDir := filepath.Join(tmp, "dst-server")
+			fs := dst.NewFS(filepath.Join(tmp, "clusters"))
+			driver := runtime.NewMockDriver(tmp, fs)
+			steamMgr := steam.NewManager(filepath.Join(tmp, "steamcmd"), dstDir, "mock")
+			workshop := steam.NewWorkshopClient("linux")
+			workshop.SetDetailsEndpoint(wsSrv.URL)
+			modSvc := NewModService(dstDir, filepath.Join(tmp, "local-mods"), store, fs, steamMgr, workshop)
+			clusterSvc := NewClusterService(store, fs, driver)
+			clusterSvc.SetModService(modSvc)
+
+			if _, err := clusterSvc.CreateCluster(CreateClusterRequest{ClusterID: "c1", ClusterName: "c1", GameMode: "endless"}); err != nil {
+				t.Fatalf("create cluster: %v", err)
+			}
+			if err := fs.WriteModOverrides("c1", "master", `return {
+  ["workshop-378160973"] = { enabled = true, configuration_options = {} },
+}`); err != nil {
+				t.Fatalf("write modoverrides: %v", err)
+			}
+			modDir := filepath.Join(dstDir, "mods", "workshop-378160973")
+			if err := os.MkdirAll(modDir, 0o755); err != nil {
+				t.Fatalf("mkdir mod: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(modDir, "modinfo.lua"), []byte(`name = "Global Positions"`), 0o644); err != nil {
+				t.Fatalf("write modinfo: %v", err)
+			}
+			if err := store.UpsertModCache(&db.ModCache{
+				ModID:                "workshop-378160973",
+				WorkshopID:           "378160973",
+				Name:                 "Global Positions",
+				InstalledTimeUpdated: 1700000000,
+			}); err != nil {
+				t.Fatalf("upsert mod cache: %v", err)
+			}
+
+			ctx := context.Background()
+			if err := clusterSvc.StartShard(ctx, "c1", "master"); err != nil {
+				t.Fatalf("start shard: %v", err)
+			}
+			defer func() { _ = clusterSvc.StopCluster(ctx, "c1") }()
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) && driver.GetShardStatus("c1", "master").State != runtime.StateRunning {
+				time.Sleep(50 * time.Millisecond)
+			}
+			if st := driver.GetShardStatus("c1", "master"); st.State != runtime.StateRunning {
+				t.Fatalf("expected master running, got %+v", st)
+			}
+			cache, _ := store.GetModCache("workshop-378160973")
+			if cache.InstalledTimeUpdated != tc.wantInstTime {
+				t.Fatalf("expected InstalledTimeUpdated=%d, got %d", tc.wantInstTime, cache.InstalledTimeUpdated)
+			}
+		})
 	}
 }
 

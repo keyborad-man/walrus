@@ -5,6 +5,7 @@ import type {
   ClusterDetail,
   ClusterINI,
   ClusterModsResponse,
+  ModUpdateCheckResult,
   ClusterSummary,
   CommandSnippet,
   FileContent,
@@ -281,6 +282,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+  checkClusterModUpdates: (id: string) =>
+    request<ModUpdateCheckResult>(`/api/v1/clusters/${encodeURIComponent(id)}/mods/updates`),
+  updateClusterMods: (id: string) =>
+    request<{ updated: number }>(`/api/v1/clusters/${encodeURIComponent(id)}/mods/updates`, { method: 'POST' }),
   redownloadMod: (modId: string, locale: string) =>
     request<{ ok: boolean }>(`/api/v1/mods/${encodeURIComponent(modId)}/download?locale=${encodeURIComponent(locale)}`, {
       method: 'POST',

@@ -48,6 +48,7 @@ const (
 	previewFetchTimeout   = 5 * time.Second
 	previewRetryCooldown  = 5 * time.Minute
 	previewBatchChunkSize = 50
+	modUpdateCheckTimeout = 15 * time.Second
 )
 
 type ModService struct {
@@ -87,7 +88,8 @@ func (s *ModService) hasInstalledDSTMod(modID string) bool {
 // EnsureShardModsReady verifies that every enabled mod in a shard's modoverrides.lua
 // is present under dst-server/mods/<modID>. Missing Workshop mods are downloaded
 // automatically via SteamCMD in a single batch; missing local mods are mirrored from
-// localModsDir when available.
+// localModsDir when available. Installed Workshop mods with a newer version on Steam
+// are updated first (best effort).
 func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard string, logFn func(level, msg string)) error {
 	emit := func(level, msg string) {
 		if logFn != nil {
@@ -123,10 +125,14 @@ func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard 
 	}
 	sort.Strings(modIDs)
 
+	var installedWorkshopIDs []string
 	var missingWorkshopIDs []string
 	var missingLocalIDs []string
 	for _, modID := range modIDs {
 		if s.hasInstalledDSTMod(modID) {
+			if wid, ok := strings.CutPrefix(modID, "workshop-"); ok && strings.TrimSpace(wid) != "" {
+				installedWorkshopIDs = append(installedWorkshopIDs, strings.TrimSpace(wid))
+			}
 			continue
 		}
 		if strings.HasPrefix(modID, "workshop-") {
@@ -156,6 +162,7 @@ func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard 
 			strings.Join(missingLocalIDs, ", "),
 		)
 	}
+	s.refreshOutdatedWorkshopMods(ctx, installedWorkshopIDs, shard, emit)
 	if len(missingWorkshopIDs) == 0 {
 		return nil
 	}
@@ -200,6 +207,32 @@ func (s *ModService) EnsureShardModsReady(ctx context.Context, clusterID, shard 
 	}
 	_ = s.SyncDedicatedServerModsSetup()
 	return nil
+}
+
+// refreshOutdatedWorkshopMods downloads newer versions of installed Workshop mods before
+// launch. DST itself never updates them (we pass -skip_update_server_mods), and a server
+// on an old version rejects every client that has the new one. A failed Steam lookup or
+// download only logs a warning so it cannot block the launch. Caller must hold prepareSem.
+func (s *ModService) refreshOutdatedWorkshopMods(ctx context.Context, wids []string, shard string, emit func(level, msg string)) {
+	if len(wids) == 0 || s.workshop == nil {
+		return
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, modUpdateCheckTimeout)
+	outdated, err := s.findOutdatedWorkshopMods(checkCtx, wids)
+	cancel()
+	if err != nil {
+		emit("warn", fmt.Sprintf("[walrus] Could not check Workshop mod updates (%v); launching %s with the installed versions.", err, shard))
+		return
+	}
+	if len(outdated) == 0 {
+		return
+	}
+	emit("system", fmt.Sprintf("[walrus] %d Workshop mod(s) have updates (%s); downloading via SteamCMD before launching %s...", len(outdated), formatOutdatedModSummary(outdated), shard))
+	if err := s.updateWorkshopModsLocked(ctx, outdated, func(msg string) {
+		emit("system", msg)
+	}); err != nil {
+		emit("warn", fmt.Sprintf("[walrus] Workshop mod update failed (%v); launching %s with the installed versions.", err, shard))
+	}
 }
 
 func (s *ModService) findModInfoPath(modID string) string {
@@ -809,74 +842,13 @@ func (s *ModService) CheckModUpdates(ctx context.Context, clusterIDs []string) (
 	}
 	sort.Strings(wids)
 
-	detailMap := make(map[string]steam.WorkshopItem, len(wids))
-	for start := 0; start < len(wids); start += previewBatchChunkSize {
-		end := start + previewBatchChunkSize
-		if end > len(wids) {
-			end = len(wids)
-		}
-		details, err := s.workshop.GetPublishedFileDetails(ctx, wids[start:end])
-		if err != nil {
-			return nil, err
-		}
-		for _, d := range details {
-			if d.WorkshopID != "" {
-				detailMap[d.WorkshopID] = d
-			}
-		}
+	outdated, err := s.findOutdatedWorkshopMods(ctx, wids)
+	if err != nil {
+		return nil, err
 	}
-
-	var outdated []OutdatedMod
-	outdatedSet := make(map[string]struct{})
-	for _, wid := range wids {
-		modID := "workshop-" + wid
-		d, hasRemote := detailMap[wid]
-		cache, _ := s.store.GetModCache(modID)
-
-		displayName := modID
-		if cache != nil && cache.Name != "" {
-			displayName = cache.Name
-		}
-		if hasRemote && d.Title != "" && displayName == modID {
-			displayName = d.Title
-		}
-
-		installed := s.hasInstalledDSTMod(modID)
-		if !installed {
-			outdated = append(outdated, OutdatedMod{
-				ModID:             modID,
-				WorkshopID:        wid,
-				Name:              displayName,
-				RemoteTimeUpdated: d.TimeUpdated,
-				PreviewURL:        d.PreviewURL,
-				Description:       d.Description,
-				Tags:              d.Tags,
-				IsClientOnly:      d.IsClientOnly,
-				Missing:           true,
-			})
-			outdatedSet[wid] = struct{}{}
-			continue
-		}
-
-		if !hasRemote || d.TimeUpdated <= 0 {
-			continue
-		}
-
-		localTS := s.localModBaselineTime(modID, cache)
-		if d.TimeUpdated > localTS {
-			outdated = append(outdated, OutdatedMod{
-				ModID:             modID,
-				WorkshopID:        wid,
-				Name:              displayName,
-				LocalTimeUpdated:  localTS,
-				RemoteTimeUpdated: d.TimeUpdated,
-				PreviewURL:        d.PreviewURL,
-				Description:       d.Description,
-				Tags:              d.Tags,
-				IsClientOnly:      d.IsClientOnly,
-			})
-			outdatedSet[wid] = struct{}{}
-		}
+	outdatedSet := make(map[string]struct{}, len(outdated))
+	for _, item := range outdated {
+		outdatedSet[item.WorkshopID] = struct{}{}
 	}
 
 	var affected []string
@@ -906,6 +878,78 @@ func (s *ModService) CheckModUpdates(ctx context.Context, clusterIDs []string) (
 	}, nil
 }
 
+// findOutdatedWorkshopMods compares the given Workshop IDs against Steam and returns
+// the ones that are missing locally or have a newer remote time_updated.
+func (s *ModService) findOutdatedWorkshopMods(ctx context.Context, wids []string) ([]OutdatedMod, error) {
+	detailMap := make(map[string]steam.WorkshopItem, len(wids))
+	for start := 0; start < len(wids); start += previewBatchChunkSize {
+		end := start + previewBatchChunkSize
+		if end > len(wids) {
+			end = len(wids)
+		}
+		details, err := s.workshop.GetPublishedFileDetails(ctx, wids[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range details {
+			if d.WorkshopID != "" {
+				detailMap[d.WorkshopID] = d
+			}
+		}
+	}
+
+	var outdated []OutdatedMod
+	for _, wid := range wids {
+		modID := "workshop-" + wid
+		d, hasRemote := detailMap[wid]
+		cache, _ := s.store.GetModCache(modID)
+
+		displayName := modID
+		if cache != nil && cache.Name != "" {
+			displayName = cache.Name
+		}
+		if hasRemote && d.Title != "" && displayName == modID {
+			displayName = d.Title
+		}
+
+		installed := s.hasInstalledDSTMod(modID)
+		if !installed {
+			outdated = append(outdated, OutdatedMod{
+				ModID:             modID,
+				WorkshopID:        wid,
+				Name:              displayName,
+				RemoteTimeUpdated: d.TimeUpdated,
+				PreviewURL:        d.PreviewURL,
+				Description:       d.Description,
+				Tags:              d.Tags,
+				IsClientOnly:      d.IsClientOnly,
+				Missing:           true,
+			})
+			continue
+		}
+
+		if !hasRemote || d.TimeUpdated <= 0 {
+			continue
+		}
+
+		localTS := s.localModBaselineTime(modID, cache)
+		if d.TimeUpdated > localTS {
+			outdated = append(outdated, OutdatedMod{
+				ModID:             modID,
+				WorkshopID:        wid,
+				Name:              displayName,
+				LocalTimeUpdated:  localTS,
+				RemoteTimeUpdated: d.TimeUpdated,
+				PreviewURL:        d.PreviewURL,
+				Description:       d.Description,
+				Tags:              d.Tags,
+				IsClientOnly:      d.IsClientOnly,
+			})
+		}
+	}
+	return outdated, nil
+}
+
 // UpdateWorkshopMods downloads a batch of outdated Workshop mods via SteamCMD and refreshes mod_cache.
 func (s *ModService) UpdateWorkshopMods(ctx context.Context, outdated []OutdatedMod) error {
 	if len(outdated) == 0 {
@@ -919,7 +963,11 @@ func (s *ModService) UpdateWorkshopMods(ctx context.Context, outdated []Outdated
 			return ctx.Err()
 		}
 	}
+	return s.updateWorkshopModsLocked(ctx, outdated, nil)
+}
 
+// updateWorkshopModsLocked is UpdateWorkshopMods for callers already holding prepareSem.
+func (s *ModService) updateWorkshopModsLocked(ctx context.Context, outdated []OutdatedMod, onProgress func(msg string)) error {
 	wids := make([]string, 0, len(outdated))
 	for _, item := range outdated {
 		if strings.TrimSpace(item.WorkshopID) != "" {
@@ -930,7 +978,7 @@ func (s *ModService) UpdateWorkshopMods(ctx context.Context, outdated []Outdated
 		return nil
 	}
 
-	if err := s.steamMgr.DownloadWorkshopMods(ctx, wids, nil); err != nil {
+	if err := s.steamMgr.DownloadWorkshopMods(ctx, wids, onProgress); err != nil {
 		return err
 	}
 

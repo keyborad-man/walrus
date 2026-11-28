@@ -138,6 +138,22 @@ export function ClusterModsPage() {
     enabled: !!id,
   })
 
+  // DST never updates server mods on its own here, and a server on an old version turns away
+  // every player who already has the new one, so check the Workshop whenever the page opens.
+  const hasWorkshopMods = (modsData?.mods ?? []).some((m) => !m.is_local)
+  const {
+    data: updatesData,
+    isError: updatesIsError,
+    error: updatesError,
+    refetch: refetchUpdates,
+  } = useQuery({
+    queryKey: ['cluster-mod-updates', id],
+    queryFn: () => api.checkClusterModUpdates(id),
+    enabled: !!id && hasWorkshopMods,
+    retry: false,
+  })
+  const outdatedModIds = new Set((updatesData?.outdated ?? []).filter((o) => !o.missing).map((o) => o.mod_id))
+
   const { data: libraryData } = useQuery({
     queryKey: ['mod-library'],
     queryFn: api.listModLibrary,
@@ -187,6 +203,7 @@ export function ClusterModsPage() {
 
   const refreshMods = () => {
     void qc.invalidateQueries({ queryKey: ['cluster-mods', id] })
+    void qc.invalidateQueries({ queryKey: ['cluster-mod-updates', id] })
     void qc.invalidateQueries({ queryKey: ['mod-library'] })
   }
 
@@ -263,6 +280,20 @@ export function ClusterModsPage() {
     },
     onError: (err: Error) => toast.error(err.message),
     onSettled: () => setRedownloadingModId(null),
+  })
+
+  const updateModsMut = useMutation({
+    mutationFn: () => api.updateClusterMods(id),
+    onSuccess: (res) => {
+      if (res.updated > 0) {
+        toast.success(t('mods.toastModsUpdated', { count: res.updated }))
+        setModsNeedRestart(true)
+      } else {
+        toast.success(t('mods.toastModsUpToDate'))
+      }
+      refreshMods()
+    },
+    onError: (err: Error) => toast.error(err.message),
   })
 
   const saveRawMut = useMutation({
@@ -516,6 +547,37 @@ export function ClusterModsPage() {
               {t('mods.crashSuspectMissing', { id: focusModId })}
             </p>
           )}
+          {outdatedModIds.size > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-2.5 text-[13px]">
+              <p className="flex items-start gap-2 min-w-0 text-amber-900 dark:text-amber-300">
+                <Download className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>{t('mods.updatesAvailable', { count: outdatedModIds.size })}</span>
+              </p>
+              {canOperate && (
+                <Button
+                  size="sm"
+                  variant="warning"
+                  disabled={updateModsMut.isPending || bulkBusy}
+                  onClick={() => updateModsMut.mutate()}
+                >
+                  <RefreshCw className={cn('h-3.5 w-3.5', updateModsMut.isPending && 'animate-spin')} />
+                  {t('mods.updateAll')}
+                </Button>
+              )}
+            </div>
+          )}
+          {updatesIsError && (
+            <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              <span>{t('mods.updatesCheckFailed', { detail: updatesError.message })}</span>
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-foreground"
+                onClick={() => void refetchUpdates()}
+              >
+                {t('mods.updatesRetry')}
+              </button>
+            </p>
+          )}
           {isLoading ? (
             <PageCardsSkeleton count={2} />
           ) : mods.length === 0 ? (
@@ -575,6 +637,9 @@ export function ClusterModsPage() {
                             </Badge>
                             {m.is_local && <Badge variant="info">{t('mods.localBadge')}</Badge>}
                             {m.version && <Badge variant="muted">v{m.version}</Badge>}
+                            {outdatedModIds.has(m.mod_id) && (
+                              <Badge variant="warning">{t('mods.updateAvailableBadge')}</Badge>
+                            )}
                           </div>
                         </div>
                       </div>

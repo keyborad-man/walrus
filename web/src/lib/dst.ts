@@ -53,6 +53,7 @@ const AUDIT_ACTION_MAP: Record<string, { zh: string; en: string }> = {
   'mod.save': { zh: '保存模组配置', en: 'Save Mod Config' },
   'mod.remove': { zh: '移除模组', en: 'Remove Mod' },
   'mod.sync': { zh: '切换模组同步', en: 'Toggle Mod Sync' },
+  'mod.update': { zh: '更新模组', en: 'Update Mods' },
   'player.kick': { zh: '踢出玩家', en: 'Kick Player' },
   'player.ban': { zh: '封禁玩家', en: 'Ban Player' },
   'player.revive': { zh: '复活玩家', en: 'Revive Player' },

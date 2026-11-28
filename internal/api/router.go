@@ -149,6 +149,7 @@ func (s *Server) Engine() *gin.Engine {
 				clusterView.GET("/backups", s.handleListBackups)
 				clusterView.GET("/backups/:bid/download", s.handleDownloadBackup)
 				clusterView.GET("/mods", s.handleGetClusterMods)
+				clusterView.GET("/mods/updates", s.handleCheckClusterModUpdates)
 				clusterView.GET("/players", s.handleGetPlayers)
 				clusterView.GET("/chat", s.handleGetChat)
 				clusterView.GET("/schedules", s.handleListClusterSchedules)
@@ -179,6 +180,7 @@ func (s *Server) Engine() *gin.Engine {
 				clusterOp.POST("/mods/local", s.handleAddLocalModToCluster)
 				clusterOp.PUT("/mods/raw", s.handleSaveRawModOverrides)
 				clusterOp.PUT("/mods/sync", s.handleSetModSync)
+				clusterOp.POST("/mods/updates", s.handleUpdateClusterMods)
 				clusterOp.PUT("/mods/:modId", s.handleSaveClusterMod)
 				clusterOp.DELETE("/mods/:modId", s.handleRemoveClusterMod)
 				// Players

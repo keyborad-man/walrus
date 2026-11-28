@@ -266,6 +266,38 @@ func (s *Server) handleRedownloadMod(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (s *Server) handleCheckClusterModUpdates(c *gin.Context) {
+	id := c.Param("id")
+	res, err := s.modSvc.CheckModUpdates(c.Request.Context(), []string{id})
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+func (s *Server) handleUpdateClusterMods(c *gin.Context) {
+	id := c.Param("id")
+	res, err := s.modSvc.CheckModUpdates(c.Request.Context(), []string{id})
+	if err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.modSvc.UpdateWorkshopMods(c.Request.Context(), res.Outdated); err != nil {
+		respondError(c, http.StatusBadRequest, err)
+		return
+	}
+	if len(res.Outdated) > 0 {
+		ids := make([]string, 0, len(res.Outdated))
+		for _, item := range res.Outdated {
+			ids = append(ids, item.ModID)
+		}
+		u := auth.CurrentUser(c)
+		s.store.AddAuditLog(u.Username, "mod.update", id, strings.Join(ids, ","), c.ClientIP())
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": len(res.Outdated)})
+}
+
 func (s *Server) handleWorkshopSearch(c *gin.Context) {
 	q := c.Query("q")
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
