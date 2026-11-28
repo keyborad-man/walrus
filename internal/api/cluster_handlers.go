@@ -56,9 +56,37 @@ func (s *Server) handleCreateCluster(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, err)
 		return
 	}
+	s.createDefaultModUpdateTask(detail)
 	u := auth.CurrentUser(c)
 	s.store.AddAuditLog(u.Username, "cluster.create", detail.ClusterID, detail.ClusterINI.ClusterName, c.ClientIP())
 	c.JSON(http.StatusCreated, gin.H{"cluster": detail})
+}
+
+// createDefaultModUpdateTask gives a new cluster a half-hourly Workshop mod update check.
+// Startup only refreshes mods at launch, so without it a long-running server falls behind
+// the first Workshop update and turns away every player who already has the new version.
+// It restarts only when nobody is online; owners can edit or delete it like any task.
+func (s *Server) createDefaultModUpdateTask(detail *service.ClusterDetail) {
+	if detail == nil {
+		return
+	}
+	name := "Mod 自动更新"
+	if detail.ClusterINI.ClusterLanguage == "en" {
+		name = "Auto-update mods"
+	}
+	if _, err := s.store.CreateScheduledTask(&db.ScheduledTask{
+		ClusterID:  detail.ClusterID,
+		Name:       name,
+		TaskType:   "mod_update",
+		CronExpr:   "*/30 * * * *",
+		ParamsJSON: `{"auto_upgrade":true,"only_when_empty":true,"countdown_sec":60,"backup_before_update":false}`,
+		Enabled:    true,
+	}); err != nil {
+		return
+	}
+	if s.cronSvc != nil {
+		_ = s.cronSvc.Reload()
+	}
 }
 
 func (s *Server) handleGetCluster(c *gin.Context) {

@@ -630,6 +630,14 @@ func TestScheduleModUpdateAndUpdateRBAC(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create cluster failed: %d %s", rec.Code, rec.Body.String())
 	}
+	// A new cluster comes with a half-hourly mod update task that only restarts when empty.
+	rec = doJSON(t, h, http.MethodGet, "/api/v1/clusters/op_world/schedules", adminTok, nil)
+	if rec.Code != http.StatusOK ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"task_type":"mod_update"`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"cron_expr":"*/30 * * * *"`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`\"only_when_empty\":true`)) {
+		t.Fatalf("expected default mod_update task for new cluster, got %d: %s", rec.Code, rec.Body.String())
+	}
 	rec = doJSON(t, h, http.MethodPost, "/api/v1/users", adminTok, map[string]any{
 		"username": "op1",
 		"password": "password123",

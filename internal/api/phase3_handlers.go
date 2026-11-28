@@ -59,6 +59,7 @@ func (s *Server) handleImportClusterZip(c *gin.Context) {
 	s.store.AddAuditLog(u.Username, "cluster.import", clusterID, "Imported save archive "+fh.Filename, c.ClientIP())
 
 	detail, _ := s.clusterSvc.GetCluster(clusterID)
+	s.createDefaultModUpdateTask(detail)
 	c.JSON(http.StatusCreated, gin.H{"cluster": detail})
 }
 
