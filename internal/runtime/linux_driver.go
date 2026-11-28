@@ -34,7 +34,10 @@ type managedProc struct {
 	restartCount  int
 	crashWindow   []time.Time
 	lastError     string
-	doneCh        chan struct{}
+	lastCrashAt   time.Time
+	// restartPending is set while waitLoop sleeps before an automatic restart.
+	restartPending bool
+	doneCh         chan struct{}
 }
 
 // LinuxDriver manages real Don't Starve Together dedicated server binaries via os/exec.
@@ -160,7 +163,7 @@ func (d *LinuxDriver) StartShard(ctx context.Context, clusterID, shard string, o
 	}
 	d.mu.Unlock()
 
-	return d.spawn(clusterID, shard, opts, 0, nil)
+	return d.spawn(clusterID, shard, opts, 0, nil, time.Time{})
 }
 
 func (d *LinuxDriver) prepareAndSpawn(prepCtx context.Context, prepCancel context.CancelFunc, mp *managedProc, binDir, binPath string) {
@@ -183,6 +186,7 @@ func (d *LinuxDriver) prepareAndSpawn(prepCtx context.Context, prepCancel contex
 	if prepErr != nil {
 		errMsg := prepErr.Error()
 		mp.state = StateCrashed
+		mp.lastCrashAt = time.Now().UTC()
 		mp.fatalError = errMsg
 		mp.lastError = errMsg
 		mp.pid = 0
@@ -233,6 +237,7 @@ func (d *LinuxDriver) prepareAndSpawn(prepCtx context.Context, prepCancel contex
 	if err := cmd.Start(); err != nil {
 		errMsg := fmt.Sprintf("start DST shard %s/%s: %v", mp.clusterID, mp.shard, err)
 		mp.state = StateCrashed
+		mp.lastCrashAt = time.Now().UTC()
 		mp.fatalError = errMsg
 		mp.lastError = errMsg
 		mp.pid = 0
@@ -263,6 +268,7 @@ func (d *LinuxDriver) failPreparedStart(mp *managedProc, err error) {
 	errMsg := err.Error()
 	d.mu.Lock()
 	mp.state = StateCrashed
+	mp.lastCrashAt = time.Now().UTC()
 	mp.fatalError = errMsg
 	mp.lastError = errMsg
 	mp.pid = 0
@@ -272,7 +278,7 @@ func (d *LinuxDriver) failPreparedStart(mp *managedProc, err error) {
 	d.emitEvent("server.crash", "DST Shard Startup Failed", fmt.Sprintf("Shard %s failed to start: %s", mp.shard, errMsg), mp.clusterID)
 }
 
-func (d *LinuxDriver) spawn(clusterID, shard string, opts StartOptions, restartCount int, crashWindow []time.Time) error {
+func (d *LinuxDriver) spawn(clusterID, shard string, opts StartOptions, restartCount int, crashWindow []time.Time, lastCrashAt time.Time) error {
 	binDir, binPath, err := d.binaryPath(opts.Arch)
 	if err != nil {
 		return err
@@ -314,6 +320,7 @@ func (d *LinuxDriver) spawn(clusterID, shard string, opts StartOptions, restartC
 		startedAt:    time.Now().UTC(),
 		restartCount: restartCount,
 		crashWindow:  crashWindow,
+		lastCrashAt:  lastCrashAt,
 		doneCh:       make(chan struct{}),
 	}
 
@@ -512,6 +519,7 @@ func (d *LinuxDriver) waitLoop(mp *managedProc) {
 		errMsg = err.Error()
 	}
 	mp.state = StateCrashed
+	mp.lastCrashAt = time.Now().UTC()
 	mp.lastError = errMsg
 	mp.pid = 0
 
@@ -530,6 +538,8 @@ func (d *LinuxDriver) waitLoop(mp *managedProc) {
 	shouldRestart := fatalErr == "" && mp.opts.AutoRestart && len(filtered) <= 3
 	nextRestartCount := mp.restartCount + 1
 	opts := mp.opts
+	lastCrashAt := mp.lastCrashAt
+	mp.restartPending = shouldRestart
 	d.mu.Unlock()
 
 	if fatalErr != "" {
@@ -560,7 +570,11 @@ func (d *LinuxDriver) waitLoop(mp *managedProc) {
 	if !stillSame {
 		return
 	}
-	if err := d.spawn(mp.clusterID, mp.shard, opts, nextRestartCount, filtered); err != nil {
+	if err := d.spawn(mp.clusterID, mp.shard, opts, nextRestartCount, filtered, lastCrashAt); err != nil {
+		d.mu.Lock()
+		mp.restartPending = false
+		mp.lastError = fmt.Sprintf("auto-restart failed: %v", err)
+		d.mu.Unlock()
 		d.logs.Publish(mp.clusterID, mp.shard, "error", fmt.Sprintf("[walrus] Auto-restart failed: %v", err))
 	}
 }
@@ -655,11 +669,16 @@ func (d *LinuxDriver) GetShardStatus(clusterID, shard string) ShardStatus {
 		return ShardStatus{Shard: shard, State: StateStopped}
 	}
 	st := ShardStatus{
-		Shard:        shard,
-		State:        mp.state,
-		PID:          mp.pid,
-		RestartCount: mp.restartCount,
-		LastError:    mp.lastError,
+		Shard:              shard,
+		State:              mp.state,
+		PID:                mp.pid,
+		RestartCount:       mp.restartCount,
+		LastError:          mp.lastError,
+		AutoRestartPending: mp.state == StateCrashed && mp.restartPending,
+	}
+	if !mp.lastCrashAt.IsZero() {
+		crashed := mp.lastCrashAt
+		st.LastCrashAt = &crashed
 	}
 	if mp.state == StateRunning || mp.state == StateStarting || mp.state == StateStopping {
 		started := mp.startedAt

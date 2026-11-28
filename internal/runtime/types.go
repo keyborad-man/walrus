@@ -25,6 +25,10 @@ type ShardStatus struct {
 	MemoryMB     float64    `json:"memory_mb"`
 	RestartCount int        `json:"restart_count"`
 	LastError    string     `json:"last_error,omitempty"`
+	// LastCrashAt is when this shard last crashed; carried across auto-restarts, cleared by a manual start.
+	LastCrashAt *time.Time `json:"last_crash_at,omitempty"`
+	// AutoRestartPending is true while a crashed shard waits out its backoff before an automatic restart.
+	AutoRestartPending bool `json:"auto_restart_pending,omitempty"`
 }
 
 type OnlinePlayer struct {

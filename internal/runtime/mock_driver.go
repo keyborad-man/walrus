@@ -25,6 +25,7 @@ type mockShard struct {
 	pid       int
 	startedAt time.Time
 	lastError string
+	crashedAt time.Time
 	cancel    context.CancelFunc
 	fileMu    sync.Mutex
 	logFile   *os.File
@@ -201,6 +202,7 @@ func (d *MockDriver) runMockLoop(ctx context.Context, ms *mockShard, w *mockWorl
 			d.mu.Lock()
 			ms.state = StateCrashed
 			ms.lastError = err.Error()
+			ms.crashedAt = time.Now().UTC()
 			ms.pid = 0
 			ms.fileMu.Lock()
 			if ms.logFile != nil {
@@ -459,11 +461,16 @@ func (d *MockDriver) GetShardStatus(clusterID, shard string) ShardStatus {
 		return ShardStatus{Shard: shard, State: StateStopped}
 	}
 	if ms.state == StateCrashed {
-		return ShardStatus{
+		st := ShardStatus{
 			Shard:     shard,
 			State:     StateCrashed,
 			LastError: ms.lastError,
 		}
+		if !ms.crashedAt.IsZero() {
+			crashed := ms.crashedAt
+			st.LastCrashAt = &crashed
+		}
+		return st
 	}
 	started := ms.startedAt
 	uptime := int64(time.Since(started).Seconds())

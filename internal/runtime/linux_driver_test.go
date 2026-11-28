@@ -66,6 +66,13 @@ func TestPrepareHookFailureAndCancellation(t *testing.T) {
 	}
 	if st := d.GetShardStatus("c1", "master"); st.State != StateCrashed {
 		t.Fatalf("expected StateCrashed after failed Prepare, got %+v", st)
+	} else {
+		if st.LastCrashAt == nil || time.Since(*st.LastCrashAt) > time.Minute {
+			t.Fatalf("expected LastCrashAt to record the crash, got %v", st.LastCrashAt)
+		}
+		if st.AutoRestartPending {
+			t.Fatalf("a failed Prepare must not report a pending auto-restart")
+		}
 	}
 
 	// 2. Stopping while Prepare is in flight must cancel Prepare context and transition cleanly to stopped.

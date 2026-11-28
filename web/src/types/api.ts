@@ -32,6 +32,8 @@ export interface ShardStatus {
   memory_mb: number
   restart_count: number
   last_error?: string
+  last_crash_at?: string
+  auto_restart_pending?: boolean
 }
 
 export interface OnlinePlayer {

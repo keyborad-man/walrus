@@ -93,6 +93,37 @@ const crashedShardNames = (c: ClusterSummary, t: TFunction) =>
     c.caves_enabled && c.caves_status?.state === 'crashed' ? t('common.cavesShort') : null,
   ].filter((x): x is string => Boolean(x))
 
+type CrashDiagnosisKind = { kind: 'mod'; modId: string } | { kind: 'oom' } | null
+
+/** Recognise the crash causes an owner can act on without reading Lua. */
+function diagnoseCrash(errors: string[]): CrashDiagnosisKind {
+  const text = errors.join('\n')
+  const mod = text.match(/workshop-(\d+)/)
+  if (mod) return { kind: 'mod', modId: mod[1] }
+  if (/out of memory|cannot allocate memory|bad_alloc/i.test(text)) return { kind: 'oom' }
+  return null
+}
+
+/** "3 minutes ago" within a day, a short date and time beyond that. */
+function formatWhen(iso: string | undefined, locale: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const diffSec = Math.round((d.getTime() - Date.now()) / 1000)
+  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' })
+  if (Math.abs(diffSec) < 60) return rtf.format(diffSec, 'second')
+  if (Math.abs(diffSec) < 3600) return rtf.format(Math.round(diffSec / 60), 'minute')
+  if (Math.abs(diffSec) < 86400) return rtf.format(Math.round(diffSec / 3600), 'hour')
+  return d.toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+/** Most recent crash time across the cluster's shards. */
+const lastCrashAt = (c: ClusterSummary) =>
+  [c.master_status.last_crash_at, c.caves_enabled ? c.caves_status?.last_crash_at : undefined]
+    .filter((x): x is string => Boolean(x))
+    .sort()
+    .pop()
+
 const totalRestarts = (c: ClusterSummary) =>
   (c.master_status.restart_count ?? 0) + (c.caves_enabled ? (c.caves_status?.restart_count ?? 0) : 0)
 
@@ -107,6 +138,8 @@ export function DashboardPage() {
   const [busyClusterId, setBusyClusterId] = useState<string | null>(null)
   const [batchBusy, setBatchBusy] = useState(false)
   const [stopAllConfirmOpen, setStopAllConfirmOpen] = useState(false)
+  // Worlds started from this page stay in their row until they are actually up, so they don't jump away.
+  const [startedHere, setStartedHere] = useState<Set<string>>(() => new Set())
   const [pendingAction, setPendingAction] = useState<{ kind: 'stop' | 'restart'; cluster: ClusterSummary } | null>(null)
 
   const { data: metricsData } = useQuery({
@@ -187,7 +220,8 @@ export function DashboardPage() {
     },
     onSuccess: (_, id) => {
       const target = clusters.find((c) => c.cluster_id === id)
-      toast.success(t('dashboard.toastStarted', { name: target ? clusterName(target) : id }))
+      toast.success(t('dashboard.toastStarting', { name: target ? clusterName(target) : id }))
+      setStartedHere((prev) => new Set(prev).add(id))
       afterClusterChange()
     },
     onError: (err: Error, id) => {
@@ -238,6 +272,25 @@ export function DashboardPage() {
     },
     onSettled: () => setBusyClusterId(null),
   })
+
+  // Restart only what crashed, so players in the other shard stay in the game.
+  const startCrashedShards = async (c: ClusterSummary) => {
+    const shards = (['master', 'caves'] as const).filter((sh) =>
+      sh === 'master' ? c.master_status.state === 'crashed' : c.caves_enabled && c.caves_status?.state === 'crashed',
+    )
+    setBusyClusterId(c.cluster_id)
+    try {
+      for (const sh of shards) await api.startCluster(c.cluster_id, sh)
+      toast.success(t('dashboard.toastShardRestarting', { name: clusterName(c), shards: crashedShardNames(c, t).join('、') }))
+    } catch (err) {
+      toast.error(t('dashboard.toastStartFailed', { name: clusterName(c) }), {
+        description: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      setBusyClusterId(null)
+      afterClusterChange()
+    }
+  }
 
   const requestClusterAction = (kind: 'stop' | 'restart', c: ClusterSummary) => {
     const players = c.world_info?.online_players?.length ?? 0
@@ -295,9 +348,17 @@ export function DashboardPage() {
 
   // A crash is the moment the owner actually opens the panel. A fully-down crashed world leads the page;
   // a partly-running one keeps a single card that carries the crash inside it, so it never appears twice.
+  const stillComingUp = (c: ClusterSummary) => startedHere.has(c.cluster_id) && c.master_status.state === 'starting'
   const crashedClusters = filteredClusters.filter((c) => isCrashed(c) && !isClusterActive(c))
-  const awakeClusters = filteredClusters.filter(isClusterActive)
-  const asleepClusters = filteredClusters.filter((c) => !isClusterActive(c) && !isCrashed(c))
+  const awakeClusters = filteredClusters.filter((c) => isClusterActive(c) && !stillComingUp(c))
+  const asleepClusters = filteredClusters.filter((c) => (!isClusterActive(c) && !isCrashed(c)) || stillComingUp(c))
+  useEffect(() => {
+    // Forget a world once it has settled (running, stopped or crashed).
+    setStartedHere((prev) => {
+      const next = new Set([...prev].filter((id) => clusters.find((c) => c.cluster_id === id)?.master_status.state === 'starting'))
+      return next.size === prev.size ? prev : next
+    })
+  }, [clusters])
 
   // Announce state changes that happen between polls, for people who cannot watch the badges.
   const prevHealth = useRef<Record<string, string>>({})
@@ -405,6 +466,16 @@ export function DashboardPage() {
               </h2>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {asleepClusters.length > 0 && awakeClusters.length > 0 && (
+                // On narrow screens the not-running list sits below tall cards; give it a shortcut.
+                <a
+                  href="#dashboard-asleep"
+                  className="inline-flex min-h-8 items-center gap-1 rounded-md px-2 text-[13px] text-muted-foreground hover:text-foreground underline underline-offset-2 xl:hidden"
+                >
+                  {t('dashboard.asleepJump', { count: asleepClusters.length })}
+                  <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                </a>
+              )}
               {showFilter && (
                 <div
                   role="group"
@@ -484,7 +555,9 @@ export function DashboardPage() {
         ) : (
           <div className="flex flex-col gap-4">
             {crashedClusters.length > 0 && (
-              <ul aria-label={t('dashboard.crashedHeading')} className="space-y-2">
+              <div>
+              <h3 className="sr-only">{t('dashboard.crashedHeading')}</h3>
+              <ul className="space-y-2">
                 {crashedClusters.map((c) => (
                   <CrashedWorldRow
                     key={c.cluster_id}
@@ -495,6 +568,7 @@ export function DashboardPage() {
                   />
                 ))}
               </ul>
+              </div>
             )}
             {awakeClusters.length > 0 && (
               <div className="grid gap-4 grid-cols-[repeat(auto-fit,minmax(min(100%,21rem),1fr))]">
@@ -509,12 +583,13 @@ export function DashboardPage() {
                     restarting={busyClusterId === c.cluster_id && restartMut.isPending}
                     onStop={() => requestClusterAction('stop', c)}
                     onRestart={() => requestClusterAction('restart', c)}
+                    onStartCrashedShards={() => startCrashedShards(c)}
                   />
                 ))}
               </div>
             )}
             {asleepClusters.length > 0 && (
-              <div className="space-y-2">
+              <div id="dashboard-asleep" className="scroll-mt-20 space-y-2">
                 {awakeClusters.length > 0 && (
                   <h3 className="text-[13px] font-medium text-muted-foreground">
                     {t('dashboard.asleepHeading', { count: asleepClusters.length })}
@@ -667,6 +742,7 @@ function WorldCard({
   restarting,
   onStop,
   onRestart,
+  onStartCrashedShards,
 }: {
   cluster: ClusterSummary
   connectHost: string
@@ -676,6 +752,7 @@ function WorldCard({
   restarting: boolean
   onStop: () => void
   onRestart: () => void
+  onStartCrashedShards: () => void
 }) {
   const { t, i18n } = useTranslation()
   const isEn = i18n.language === 'en-US'
@@ -689,7 +766,7 @@ function WorldCard({
   const name = clusterName(c)
   const health = getClusterHealth(c.master_status, c.caves_enabled, c.caves_status)
   const restarts = totalRestarts(c)
-  const lit = health === 'running' && c.world_info?.day > 0
+  const lit = health === 'running' && c.world_info?.day > 0 && c.has_token
   // Forest down means nobody can be in the world, whatever the caves report.
   const masterCrashed = c.master_status.state === 'crashed'
   const running = c.master_status.state === 'running'
@@ -727,35 +804,38 @@ function WorldCard({
           <Readiness cluster={c} health={health} />
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5 pt-0.5">
-          <ShardStateBadge state={health} />
-          {restarts > 0 && (
+          {/* A partial crash is serious but not total: say so with amber, not the red of a dead world. */}
+          <ShardStateBadge state={health === 'crashed' ? 'degraded' : health} />
+          {restarts > 0 && health !== 'crashed' && (
             <Link
               to={`/clusters/${encodeURIComponent(c.cluster_id)}/console`}
+              aria-label={t('dashboard.crashRestartsAria', { name })}
               className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[12px] font-medium text-amber-800 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-amber-300"
             >
               <CircleAlert className="h-3 w-3 shrink-0" aria-hidden="true" />
-              {t('dashboard.crashRestarts', { count: restarts })}
+              {lastCrashAt(c)
+                ? t('dashboard.crashRestartsAt', { count: restarts, time: formatWhen(lastCrashAt(c), i18n.language) })
+                : t('dashboard.crashRestarts', { count: restarts })}
             </Link>
           )}
         </div>
       </header>
 
       {health === 'crashed' && (
-        <div className="mx-5 mt-4 flex items-start gap-2.5 rounded-lg border border-red-500/35 bg-red-500/[0.07] px-3.5 py-3">
-          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
-          <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-semibold text-foreground">
-              {t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
-            </p>
-            <CrashReason errors={crashErrors(c)} />
-            <Link
-              to={`/clusters/${encodeURIComponent(c.cluster_id)}/console`}
-              className="mt-2 inline-flex items-center gap-1 text-[13px] font-medium text-foreground underline underline-offset-2 hover:opacity-80"
-            >
-              <Terminal className="h-3.5 w-3.5" aria-hidden="true" />
-              {t('dashboard.viewLogs')}
-            </Link>
-          </div>
+        // One shard down while the other runs: an amber section of this card, not a second card.
+        <div className="mx-5 mt-4 space-y-2.5 rounded-lg bg-amber-500/[0.08] px-3.5 py-3">
+          <p className="flex items-center gap-1.5 text-[13px] font-semibold text-foreground">
+            <CircleAlert className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-400" aria-hidden="true" />
+            {t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
+          </p>
+          <CrashDiagnosis cluster={c} />
+          <CrashActions
+            cluster={c}
+            busy={busy}
+            blockReason={null}
+            recoverLabel={t('dashboard.restartShard', { shard: crashedShardNames(c, t).join('、') })}
+            onRecover={onStartCrashedShards}
+          />
         </div>
       )}
 
@@ -877,40 +957,133 @@ function Readiness({ cluster: c, health }: { cluster: ClusterSummary; health: Co
   )
 }
 
-/** The shard's own last error: first line up front, the rest one click away. */
-function CrashReason({ errors }: { errors: string[] }) {
-  const { t } = useTranslation()
-  if (errors.length === 0) return <p className="mt-1 text-[13px] text-muted-foreground">{t('dashboard.crashedHint')}</p>
-  const full = errors.join('\n\n')
-  const firstLine = full.split('\n').find((l) => l.trim()) ?? full
-  const hasMore = full.trim() !== firstLine.trim()
+/**
+ * What happened, when, and what to do about it, in plain words. The raw trace stays one
+ * click away for whoever can read it, so the summary line never gets truncated mid-path.
+ */
+function CrashDiagnosis({ cluster: c }: { cluster: ClusterSummary }) {
+  const { t, i18n } = useTranslation()
+  const errors = crashErrors(c)
+  const diagnosis = diagnoseCrash(errors)
+  const { data: libraryData } = useQuery({
+    queryKey: ['mod-library'],
+    queryFn: api.listModLibrary,
+    enabled: diagnosis?.kind === 'mod',
+    staleTime: 5 * 60 * 1000,
+  })
+  const restarts = totalRestarts(c)
+  const pending =
+    (c.master_status.state === 'crashed' && c.master_status.auto_restart_pending) ||
+    (c.caves_enabled && c.caves_status?.state === 'crashed' && c.caves_status.auto_restart_pending)
+  const when = formatWhen(lastCrashAt(c), i18n.language)
+  const modName =
+    diagnosis?.kind === 'mod'
+      ? (libraryData?.mods.find((m) => m.workshop_id === diagnosis.modId || m.mod_id === `workshop-${diagnosis.modId}`)?.name ??
+        `workshop-${diagnosis.modId}`)
+      : ''
+
+  const status = [
+    when ? t('dashboard.crashedAt', { time: when }) : '',
+    pending
+      ? t('dashboard.autoRestartPending')
+      : restarts > 0 && c.auto_restart
+        ? t('dashboard.crashedAutoRestarted', { count: restarts })
+        : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   return (
-    <div className="mt-1.5 min-w-0">
-      <p className="text-[12px] font-medium text-muted-foreground">{t('dashboard.crashReason')}</p>
-      {hasMore ? (
-        <details className="group mt-0.5">
-          <summary className="flex cursor-pointer list-none items-start gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
-            <code className="min-w-0 flex-1 truncate text-[12px] text-red-800 group-open:hidden dark:text-red-300">{firstLine}</code>
-            <span className="shrink-0 text-[12px] text-muted-foreground underline underline-offset-2 group-open:hidden">
-              {t('dashboard.showFullError')}
-            </span>
-            <span className="hidden shrink-0 text-[12px] text-muted-foreground underline underline-offset-2 group-open:inline">
-              {t('dashboard.hideFullError')}
-            </span>
+    <div className="min-w-0 space-y-1">
+      {status && (
+        <p className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
+          {pending && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden="true" />}
+          {status}
+        </p>
+      )}
+      <p className="text-[13px] text-foreground text-pretty">
+        {diagnosis?.kind === 'mod'
+          ? t('dashboard.diagnoseMod', { name: modName })
+          : diagnosis?.kind === 'oom'
+            ? t('dashboard.diagnoseOom')
+            : t('dashboard.crashedHint')}
+      </p>
+      {errors.length > 0 && (
+        <details className="group">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-[12px] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+            <span className="group-open:hidden">{t('dashboard.showFullError')}</span>
+            <span className="hidden group-open:inline">{t('dashboard.hideFullError')}</span>
           </summary>
           <pre className="mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--surface-terminal)] px-3 py-2 font-mono text-[12px] leading-relaxed text-[var(--foreground)]">
-            {full}
+            {errors.join('\n\n')}
           </pre>
         </details>
-      ) : (
-        <code className="mt-0.5 block break-words text-[12px] text-red-800 dark:text-red-300">{firstLine}</code>
       )}
     </div>
   )
 }
 
-/** A crashed world: pinned above everything, with the way to find out why. */
+/** The action that fixes the cause, when the cause is known; the logs otherwise. */
+function CrashActions({
+  cluster: c,
+  busy,
+  blockReason,
+  recoverLabel,
+  onRecover,
+}: {
+  cluster: ClusterSummary
+  busy: boolean
+  blockReason: string | null
+  recoverLabel: string
+  onRecover: () => void
+}) {
+  const { t } = useTranslation()
+  const name = clusterName(c)
+  const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
+  const diagnosis = diagnoseCrash(crashErrors(c))
+  const pending =
+    (c.master_status.state === 'crashed' && c.master_status.auto_restart_pending) ||
+    (c.caves_enabled && c.caves_status?.state === 'crashed' && c.caves_status.auto_restart_pending)
+  const base = `/clusters/${encodeURIComponent(c.cluster_id)}`
+  const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
+  const fixHref = diagnosis?.kind === 'mod' && canOperate ? `${base}/mods` : null
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+      {!canOperate && <span className="text-[13px] text-muted-foreground">{t('dashboard.needOperator')}</span>}
+      {canOperate && blockReason && <span className="text-[13px] text-muted-foreground">{blockReason}</span>}
+      {fixHref && (
+        <Link to={fixHref} aria-label={forWorld(t('dashboard.fixMod'))} className={buttonVariants({ size: 'sm' })}>
+          {t('dashboard.fixMod')}
+          <ArrowRight className="h-3.5 w-3.5" />
+        </Link>
+      )}
+      <Link
+        to={`${base}/console`}
+        aria-label={forWorld(t('dashboard.viewLogs'))}
+        className={buttonVariants({ size: 'sm', variant: fixHref ? 'outline' : 'default' })}
+      >
+        <Terminal className="h-3.5 w-3.5" />
+        {t('dashboard.viewLogs')}
+      </Link>
+      {canOperate && !pending && (
+        // Restarting is offered, but never as the loudest choice: it already failed at least once.
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || !!blockReason}
+          onClick={onRecover}
+          aria-label={forWorld(recoverLabel)}
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+          {recoverLabel}
+        </Button>
+      )}
+    </div>
+  )
+}
+
+/** A world that crashed completely: pinned above everything. */
 function CrashedWorldRow({
   cluster: c,
   busy,
@@ -924,46 +1097,29 @@ function CrashedWorldRow({
 }) {
   const { t } = useTranslation()
   const name = clusterName(c)
-  const canOperate = c.effective_role === 'admin' || c.effective_role === 'operator'
-  const restarts = totalRestarts(c)
-  const crashedShards = crashedShardNames(c, t)
-  const forWorld = (action: string) => t('dashboard.ariaFor', { action, name })
-  const base = `/clusters/${encodeURIComponent(c.cluster_id)}`
+  const overviewHref = `/clusters/${encodeURIComponent(c.cluster_id)}/overview`
 
   return (
-    <li className="flex flex-wrap items-start gap-x-4 gap-y-2.5 rounded-xl border border-red-500/40 bg-red-500/[0.07] px-4 py-3 sm:px-5">
+    <li className="flex flex-wrap items-start gap-x-4 gap-y-3 rounded-xl border border-red-500/40 bg-red-500/[0.07] px-4 py-3.5 sm:px-5">
       <CircleAlert className="mt-0.5 h-5 w-5 shrink-0 text-red-700 dark:text-red-400" aria-hidden="true" />
-      <div className="min-w-0 flex-1 basis-56">
+      <div className="min-w-0 flex-1 basis-64 space-y-1">
         <p className="text-[14px] font-semibold text-foreground">
-          {t('dashboard.crashedTitle', { name, shards: crashedShards.join('、') })}
+          <Link to={overviewHref} className="hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm">
+            {name}
+          </Link>
+          <span className="font-normal text-muted-foreground"> · </span>
+          {t('dashboard.shardCrashed', { shards: crashedShardNames(c, t).join('、') })}
         </p>
-        {restarts > 0 && c.auto_restart && (
-          <p className="mt-0.5 text-[13px] text-muted-foreground">{t('dashboard.crashedAutoRestarted', { count: restarts })}</p>
-        )}
-        <CrashReason errors={crashErrors(c)} />
+        <CrashDiagnosis cluster={c} />
       </div>
-      <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
-        {!canOperate && <span className="text-[13px] text-muted-foreground">{t('dashboard.needOperator')}</span>}
-        {canOperate && startBlockReason && <span className="text-[13px] text-muted-foreground">{startBlockReason}</span>}
-        <Link
-          to={`${base}/console`}
-          aria-label={forWorld(t('dashboard.viewLogs'))}
-          className={buttonVariants({ size: 'sm', variant: 'outline' })}
-        >
-          <Terminal className="h-3.5 w-3.5" />
-          {t('dashboard.viewLogs')}
-        </Link>
-        {canOperate && (
-          <Button
-            size="sm"
-            disabled={busy || !!startBlockReason}
-            onClick={onRecover}
-            aria-label={forWorld(t('dashboard.recoverWorld'))}
-          >
-            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
-            {t('dashboard.recoverWorld')}
-          </Button>
-        )}
+      <div className="ml-auto">
+        <CrashActions
+          cluster={c}
+          busy={busy}
+          blockReason={startBlockReason}
+          recoverLabel={t('dashboard.recoverWorld')}
+          onRecover={onRecover}
+        />
       </div>
     </li>
   )
@@ -1012,7 +1168,7 @@ function SleepingWorldRow({
       </div>
       <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
         {note && <span className="text-[13px] text-muted-foreground">{note}</span>}
-        {canOperate && (
+        {canOperate && !isClusterActive(c) && (
           <Button
             size="sm"
             variant="outline"
@@ -1055,7 +1211,7 @@ function WorldClock({ cluster: c, running }: { cluster: ClusterSummary; running:
             aria-hidden="true"
             className="absolute -inset-3 rounded-full auth-campfire-breathe"
             style={{
-              background: 'radial-gradient(circle, color-mix(in srgb, var(--ember) 42%, transparent) 0%, transparent 70%)',
+              background: 'radial-gradient(circle, var(--ember-glow) 0%, transparent 70%)',
             }}
           />
         )}
@@ -1235,7 +1391,12 @@ function JoinInfo({
       </dl>
       {connectCmd && (
         <div className="mt-2.5">
-          <Button size="sm" className="w-full" onClick={() => void copyConnect()}>
+          <Button
+            size="sm"
+            className="w-full"
+            onClick={() => void copyConnect()}
+            aria-label={t('dashboard.ariaFor', { action: t('dashboard.copyDirectConnect'), name: clusterName(c) })}
+          >
             <Copy className="h-3.5 w-3.5" />
             {t('dashboard.copyDirectConnect')}
           </Button>
